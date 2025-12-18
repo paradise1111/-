@@ -1,14 +1,19 @@
-import { GeneratedContent } from "../types";
+
+import { GeneratedContent, UserConfig } from "../types";
 
 // UI Display Fallback
-// 前端仅用于显示默认的模型名称，不再处理实际逻辑
 export const PRIMARY_MODEL = 'gemini-3-pro-preview';
 export const FALLBACK_MODEL = 'gemini-3-flash-preview'; 
 
-export const checkConnectivity = async (): Promise<boolean> => {
+export const checkConnectivity = async (config?: UserConfig): Promise<boolean> => {
   try {
+    const headers: Record<string, string> = {};
+    if (config?.apiKey) headers['x-custom-api-key'] = config.apiKey;
+    if (config?.baseUrl) headers['x-custom-base-url'] = config.baseUrl;
+    if (config?.modelId) headers['x-custom-model'] = config.modelId;
+
     // 调用后端 API 进行连通性检查
-    const response = await fetch('/api/generate?check=true');
+    const response = await fetch('/api/generate?check=true', { headers });
     if (response.ok) {
         const data = await response.json();
         return data.success;
@@ -20,13 +25,18 @@ export const checkConnectivity = async (): Promise<boolean> => {
   }
 };
 
-export const generateBriefing = async (targetDate: string): Promise<GeneratedContent> => {
-  // 调用后端 API 进行生成，API Key 存储在后端环境中
+export const generateBriefing = async (targetDate: string, config?: UserConfig): Promise<GeneratedContent> => {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json'
+  };
+  if (config?.apiKey) headers['x-custom-api-key'] = config.apiKey;
+  if (config?.baseUrl) headers['x-custom-base-url'] = config.baseUrl;
+  if (config?.modelId) headers['x-custom-model'] = config.modelId;
+
+  // 调用后端 API 进行生成
   const response = await fetch('/api/generate', {
     method: 'POST',
-    headers: {
-        'Content-Type': 'application/json'
-    },
+    headers: headers,
     body: JSON.stringify({ date: targetDate })
   });
 

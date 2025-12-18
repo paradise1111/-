@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Activity, Globe, HeartPulse, RefreshCw, Server, ShieldCheck, Sparkles, Mail, Clock, Send, Stethoscope, AlertTriangle } from 'lucide-react';
+import { Activity, Globe, HeartPulse, RefreshCw, Server, ShieldCheck, Sparkles, Mail, Clock, Send, Stethoscope, AlertTriangle, Settings } from 'lucide-react';
 import { GlassCard } from './components/GlassCard';
 import { StatusBadge } from './components/StatusBadge';
 import { TypewriterText } from './components/TypewriterText';
+import { SettingsModal } from './components/SettingsModal';
 import { checkConnectivity, generateBriefing, PRIMARY_MODEL } from './services/geminiService';
 import { sendEmail } from './services/emailService';
-import { AppStatus, GeneratedContent, NewsItem } from './types';
+import { AppStatus, GeneratedContent, NewsItem, UserConfig } from './types';
 
 interface NewsCardProps {
   item: NewsItem;
@@ -36,6 +37,8 @@ export default function App() {
   const [emails, setEmails] = useState<string[]>(['', '', '']);
   const [lastAutoRunDate, setLastAutoRunDate] = useState<string>("");
   const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [userConfig, setUserConfig] = useState<UserConfig>({});
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Time Logic
@@ -50,21 +53,47 @@ export default function App() {
   const targetDateStr = yesterday.toISOString().split('T')[0];
   const displayTime = beijingTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
+  // Load config from localStorage
+  useEffect(() => {
+    const savedConfig = localStorage.getItem('aurora_config');
+    if (savedConfig) {
+      try {
+        setUserConfig(JSON.parse(savedConfig));
+      } catch (e) {
+        console.error("Failed to parse saved config", e);
+      }
+    }
+  }, []);
+
+  const handleSaveConfig = (newConfig: UserConfig) => {
+    setUserConfig(newConfig);
+    localStorage.setItem('aurora_config', JSON.stringify(newConfig));
+    addLog("配置已更新。正在重新建立连接...");
+    // 重新触发连接检查
+    initConnection(newConfig);
+  };
+
+  const initConnection = async (config: UserConfig) => {
+    setStatus(AppStatus.CONNECTING);
+    const modelName = config.modelId || PRIMARY_MODEL;
+    addLog(`正在初始化与 AI 网关的连接... 目标模型: ${modelName}`);
+    if (config.baseUrl) {
+        addLog(`使用自定义网关: ${config.baseUrl}`);
+    }
+    
+    const isConnected = await checkConnectivity(config);
+    if (isConnected) {
+      setStatus(AppStatus.IDLE);
+      addLog(`握手成功。通信链路正常。当前节点: ${modelName}`);
+    } else {
+      setStatus(AppStatus.ERROR);
+      addLog(`严重错误: 无法连接至模型 ${modelName}。请检查 API Key / Base URL 设置。`);
+    }
+  };
+
   useEffect(() => {
     // Initial Connectivity Check
-    const init = async () => {
-      setStatus(AppStatus.CONNECTING);
-      addLog(`正在初始化与 AI 网关的连接... 目标模型: ${PRIMARY_MODEL}`);
-      const isConnected = await checkConnectivity();
-      if (isConnected) {
-        setStatus(AppStatus.IDLE);
-        addLog(`握手成功。通信链路正常。当前节点: ${PRIMARY_MODEL}`);
-      } else {
-        setStatus(AppStatus.ERROR);
-        addLog(`严重错误: 无法连接至模型 ${PRIMARY_MODEL}。请检查 API Key 权限或后台日志。`);
-      }
-    };
-    init();
+    initConnection(userConfig);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -109,15 +138,17 @@ export default function App() {
     setStatus(AppStatus.SEARCHING);
     addLog(`启动自动化序列。目标日期: ${targetDateStr}`);
     
+    const currentModel = userConfig.modelId || PRIMARY_MODEL;
+
     try {
       addLog("正在调用 Search Tool 进行链接验证...");
       await new Promise(r => setTimeout(r, 800)); 
       addLog("正在从全球源检索索引...");
       
       setStatus(AppStatus.GENERATING);
-      addLog(`正在使用 ${PRIMARY_MODEL} 合成双语内容...`);
+      addLog(`正在使用 ${currentModel} 合成双语内容...`);
       
-      const result = await generateBriefing(targetDateStr);
+      const result = await generateBriefing(targetDateStr, userConfig);
       
       setData(result);
       setStatus(AppStatus.COMPLETED);
@@ -134,9 +165,9 @@ export default function App() {
       // 用户友好的错误解析
       let errorMsg = e.message || "未知错误";
       if (errorMsg.includes("API key not valid") || errorMsg.includes("400")) {
-        errorMsg = "API Key 无效 (400)。请检查 .env 中的 Key 是否包含多余空格或引号。";
+        errorMsg = "API Key 无效 (400)。请检查设置中的 API Key。";
       } else if (errorMsg.includes("API_KEY is missing")) {
-        errorMsg = "服务器未配置 API_KEY。请在 Vercel 后台添加环境变量。";
+        errorMsg = "未配置 API Key。请在设置中输入 Key 或在服务器配置。";
       }
 
       addLog(`❌ 生成过程中出错: ${errorMsg}`);
@@ -176,6 +207,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen relative text-gray-200 selection:bg-indigo-500/30">
+      <SettingsModal 
+        isOpen={isSettingsOpen} 
+        onClose={() => setIsSettingsOpen(false)}
+        onSave={handleSaveConfig}
+        initialConfig={userConfig}
+      />
+
       {/* Aurora Background */}
       <div className="fixed inset-0 pointer-events-none z-0">
          <div className="absolute top-[-20%] left-[20%] w-[600px] h-[600px] bg-purple-900/20 rounded-full blur-[120px] mix-blend-screen animate-pulse"></div>
@@ -206,6 +244,13 @@ export default function App() {
               <div className="font-mono text-xl text-white">{displayTime}</div>
             </div>
             <StatusBadge status={status === AppStatus.ERROR ? 'offline' : (status === AppStatus.IDLE || status === AppStatus.COMPLETED ? 'online' : 'busy')} />
+            
+            <button 
+              onClick={() => setIsSettingsOpen(true)}
+              className="p-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/5 transition-colors"
+            >
+              <Settings className="w-5 h-5 text-gray-300" />
+            </button>
           </div>
         </header>
 
@@ -233,7 +278,9 @@ export default function App() {
                   </div>
                   <div className="flex justify-between text-sm mb-2">
                      <span className="text-gray-400">模型节点</span>
-                     <span className="text-emerald-400 font-mono text-xs truncate max-w-[150px] text-right" title={PRIMARY_MODEL}>{PRIMARY_MODEL}</span>
+                     <span className="text-emerald-400 font-mono text-xs truncate max-w-[150px] text-right" title={userConfig.modelId || PRIMARY_MODEL}>
+                       {userConfig.modelId || PRIMARY_MODEL}
+                     </span>
                   </div>
                   <div className="flex justify-between text-sm">
                     <span className="text-gray-400">下次自动运行</span>

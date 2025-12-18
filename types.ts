@@ -1,3 +1,4 @@
+
 export interface NewsItem {
   title_cn: string;
   title_en: string;
@@ -28,4 +29,10 @@ export interface ModelConfig {
   id: string;
   name: string;
   description: string;
+}
+
+export interface UserConfig {
+  apiKey?: string;
+  baseUrl?: string;
+  modelId?: string;
 }
