@@ -11,8 +11,10 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
     <script>
       // Polyfill for process.env in browser environments to prevent crashes
-      if (typeof window !== 'undefined' && typeof process === 'undefined') {
-        window.process = { env: {} };
+      // 增强版 Polyfill，防止覆盖已有的 process 对象
+      if (typeof window !== 'undefined') {
+        window.process = window.process || {};
+        if (!window.process.env) window.process.env = {};
       }
     </script>
     <style>
@@ -64,14 +66,18 @@
   "imports": {
     "react": "https://esm.sh/react@^19.2.3",
     "react/": "https://esm.sh/react@^19.2.3/",
+    "react-dom": "https://esm.sh/react-dom@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react-dom/client": "https://esm.sh/react-dom@^19.2.3/client",
     "lucide-react": "https://esm.sh/lucide-react@^0.561.0",
-    "@google/genai": "https://esm.sh/@google/genai@^1.34.0",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/"
+    "@google/genai": "https://esm.sh/@google/genai@^1.34.0"
   }
 }
 </script>
 </head>
   <body>
     <div id="root"></div>
+    <!-- 关键修复：添加入口脚本 -->
+    <script type="module" src="./index.tsx"></script>
   </body>
 </html>
