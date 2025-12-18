@@ -25,20 +25,44 @@ export default async function handler(request, response) {
      baseUrl = `${baseUrl}/v1`;
   }
 
+  // Helper: Balance Truncated JSON
+  const balanceJson = (jsonStr) => {
+    let stack = [];
+    let inString = false;
+    let isEscaped = false;
+    for (const char of jsonStr) {
+        if (inString) {
+            if (char === '\\') isEscaped = !isEscaped;
+            else if (char === '"' && !isEscaped) inString = false;
+            else isEscaped = false;
+        } else {
+            if (char === '"') inString = true;
+            else if (char === '{') stack.push('}');
+            else if (char === '[') stack.push(']');
+            else if (char === '}') { if (stack.length && stack[stack.length - 1] === '}') stack.pop(); }
+            else if (char === ']') { if (stack.length && stack[stack.length - 1] === ']') stack.pop(); }
+        }
+    }
+    let recovery = "";
+    if (inString) recovery += '"';
+    while (stack.length > 0) recovery += stack.pop();
+    return jsonStr + recovery;
+  };
+
   // Helper: Extract and Repair JSON
   const extractAndRepairJson = (str) => {
     if (!str) return "";
-    const firstOpen = str.indexOf('{');
-    const lastClose = str.lastIndexOf('}');
-    let jsonCandidate = str;
-    if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-      jsonCandidate = str.substring(firstOpen, lastClose + 1);
-    } else {
-      jsonCandidate = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
+    let cleanStr = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
+    const firstOpen = cleanStr.indexOf('{');
+    if (firstOpen === -1) return cleanStr; 
+    cleanStr = cleanStr.substring(firstOpen);
+    cleanStr = cleanStr.replace(/,(\s*[}\]])/g, '$1');
+    try {
+        JSON.parse(cleanStr);
+        return cleanStr;
+    } catch (e) {
+        return balanceJson(cleanStr);
     }
-    // Fix trailing commas
-    jsonCandidate = jsonCandidate.replace(/,(\s*[}\]])/g, '$1');
-    return jsonCandidate;
   };
 
   const now = new Date();
@@ -62,10 +86,8 @@ export default async function handler(request, response) {
 
     const prompt = `
       Task: Search for ${targetDateStr} news.
-      CRITICAL: Use REAL Internet Search. NO HALLUCINATIONS.
-      Requirements: Valid source_url required. Bilingual.
-      Output: Strictly Valid MINIFIED JSON ONLY. No Markdown code blocks.
-      Format: Escape all newlines in strings as \\n.
+      SAFETY: Report Public Health news only. No medical advice.
+      Output: Valid JSON. Limit 4 items per list.
       Structure: ${jsonStructure}
     `;
 
@@ -74,8 +96,9 @@ export default async function handler(request, response) {
     const requestOptions = {
         model: modelId,
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 4096,
-        temperature: 0.3
+        max_tokens: 8192,
+        temperature: 0.3,
+        response_format: { type: "json_object" }
     };
 
     const completion = await client.chat.completions.create(requestOptions);
