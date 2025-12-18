@@ -5,21 +5,21 @@ import OpenAI from "openai";
 export default async function handler(request, response) {
   console.log("⏰ Cron Job Started: Generating Daily Briefing...");
 
-  let apiKey = process.env.API_KEY;
-  let baseUrl = process.env.API_BASE_URL || 'https://api.openai.com/v1'; 
-  const resendApiKey = process.env.RESEND_API_KEY;
-  const fromEmail = process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>';
+  let apiKey = (process.env.API_KEY || '').replace(/['"]/g, '').trim();
+  let baseUrl = (process.env.API_BASE_URL || 'https://api.openai.com/v1').replace(/['"]/g, '').trim(); 
+  const resendApiKey = (process.env.RESEND_API_KEY || '').replace(/['"]/g, '').trim();
+  
+  let fromEmail = (process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>').replace(/['"]/g, '').trim();
+  if (!fromEmail.includes('@')) fromEmail = 'Aurora News <onboarding@resend.dev>';
+
   const modelId = process.env.GEMINI_MODEL_ID || 'gemini-1.5-pro';
   const recipientsEnv = process.env.RECIPIENT_LIST;
-  const recipients = recipientsEnv ? recipientsEnv.split(',').map(e => e.trim()) : [];
+  const recipients = recipientsEnv ? recipientsEnv.split(',').map(e => e.trim()).filter(e => e) : [];
 
   if (!apiKey || !resendApiKey || recipients.length === 0) {
     console.error("Missing configuration");
-    return response.status(500).json({ error: "Configuration missing" });
+    return response.status(500).json({ error: "Configuration missing (API Keys or Recipient List)" });
   }
-
-  // Clean API Key
-  apiKey = apiKey.trim().replace(/^['"]|['"]$/g, '');
 
   // Normalize Base URL
   baseUrl = baseUrl.replace(/\/$/, '');
@@ -51,27 +51,39 @@ export default async function handler(request, response) {
     `;
 
     const prompt = `
-      任务：搜索 ${targetDateStr} 的新闻。
-      1. 精选 6 条全球/政治/经济新闻。
-      2. 精选 6 条医学/健康/科学文献突破。
-      要求：
-      - 提供真实 source_url。
-      - 小红书风格标题。
-      - 中英双语对照。
+      Task: Search for ${targetDateStr} news.
+      CRITICAL: Use REAL Internet Search. NO HALLUCINATIONS.
       
-      IMPORTANT: Return VALID JSON only. No Markdown.
+      Requirements:
+      - Valid source_url required.
+      - Bilingual.
+      
       Structure: ${jsonStructure}
     `;
 
     console.log(`Generating content for ${targetDateStr} using ${modelId} via ${baseUrl}...`);
 
-    const completion = await client.chat.completions.create({
+    const requestOptions = {
         model: modelId,
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" }
-    });
+    };
 
-    // SAFETY CHECK
+    if (modelId.toLowerCase().includes('gemini')) {
+        requestOptions.tools = [
+            {
+                type: "function",
+                function: {
+                    name: "google_search_retrieval",
+                    description: "Google Search",
+                    parameters: { type: "object", properties: {} }
+                }
+            }
+        ];
+    }
+
+    const completion = await client.chat.completions.create(requestOptions);
+
     if (!completion || !completion.choices || completion.choices.length === 0) {
         throw new Error(`Invalid response structure from model: choices missing. Response: ${JSON.stringify(completion)}`);
     }
@@ -125,7 +137,10 @@ export default async function handler(request, response) {
       }),
     });
 
-    if (!emailRes.ok) throw new Error(await emailRes.text());
+    if (!emailRes.ok) {
+        const errText = await emailRes.text();
+        throw new Error(`Resend Error: ${errText}`);
+    }
     
     console.log("Cron Job Completed.");
     return response.status(200).json({ success: true, date: targetDateStr });

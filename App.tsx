@@ -186,6 +186,8 @@ export default function App() {
         errorMsg = `认证失败 (400)。Key 无效或 Base URL 缺失。`;
       } else if (errorMsg.includes("404")) {
          errorMsg = `模型未找到 (404)。请尝试在设置中切换为 gemini-1.5-pro`;
+      } else if (errorMsg.includes("Hallucination")) {
+         errorMsg = `内容校验失败 (幻觉检测)。请检查模型联网权限。`;
       }
 
       addLog(`❌ 生成出错: ${errorMsg}`);

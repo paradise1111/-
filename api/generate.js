@@ -121,28 +121,47 @@ export default async function handler(request, response) {
       `;
 
       const systemPrompt = `
-        你是一位专业的资深新闻编辑和双语内容创作者。
-        任务：搜索昨日（${date}）的新闻，精选 6 条全球时政新闻和 6 条医学文献突破。
-        要求：
-        1. 提供真实 source_url。
-        2. 双语对应。
-        3. 小红书风格标题。
+        You are a senior news editor.
         
-        IMPORTANT: Output valid JSON only. Structure:
+        CRITICAL: 
+        1. Retrieve REAL news for ${date} using Internet Search.
+        2. DO NOT HALLUCINATE. Source URLs must be valid and accessible.
+        3. If you cannot search, stop and return an error.
+
+        Task: Select 6 Global News and 6 Medical News from YESTERDAY.
+        Output: Bilingual JSON.
+        
+        Structure:
         ${jsonStructure}
       `;
 
       const attempt = async (mId, retryLevel = 0) => {
          console.log(`Generating with ${mId} @ ${baseUrl} (Level ${retryLevel})`);
          try {
-            const completion = await client.chat.completions.create({
+            const requestOptions = {
                 model: mId,
                 messages: [
                     { role: "system", content: systemPrompt },
-                    { role: "user", content: "Start" }
+                    { role: "user", content: `Search online for ${date} news.` }
                 ],
                 response_format: { type: "json_object" }
-            });
+            };
+
+            // Attempt to inject Google Search tool if model looks like Gemini
+            if (mId.toLowerCase().includes('gemini')) {
+                requestOptions.tools = [
+                    {
+                        type: "function",
+                        function: {
+                            name: "google_search_retrieval",
+                            description: "Google Search",
+                            parameters: { type: "object", properties: {} }
+                        }
+                    }
+                ];
+            }
+
+            const completion = await client.chat.completions.create(requestOptions);
 
             // SAFETY CHECK
             if (!completion || !completion.choices || completion.choices.length === 0) {
@@ -150,7 +169,17 @@ export default async function handler(request, response) {
             }
 
             const text = completion.choices[0].message.content;
-            return JSON.parse(text);
+            const parsed = JSON.parse(text);
+
+            // Fake news validation
+            if (parsed.general_news && parsed.general_news.length > 0) {
+                 const url = parsed.general_news[0].source_url;
+                 if (!url || url === "String" || url.includes("example.com")) {
+                     throw new Error("Hallucination detected: Invalid source URLs.");
+                 }
+            }
+            
+            return parsed;
          } catch (err) {
              const msg = err.message || JSON.stringify(err);
              console.warn(`Error with ${mId}: ${msg}`);

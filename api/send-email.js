@@ -1,3 +1,4 @@
+
 // api/send-email.js
 export default async function handler(request, response) {
   response.setHeader('Access-Control-Allow-Credentials', true);
@@ -17,9 +18,18 @@ export default async function handler(request, response) {
     return response.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  const resendApiKey = process.env.RESEND_API_KEY;
-  // 获取自定义发件人地址，如果没有配置则使用 Resend 默认测试地址
-  const fromEmail = process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>';
+  // Sanitize Config: Remove quotes and trim whitespace
+  const resendApiKey = (process.env.RESEND_API_KEY || '').replace(/['"]/g, '').trim();
+  
+  // Handle From Email
+  let fromEmailRaw = process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>';
+  let fromEmail = fromEmailRaw.replace(/['"]/g, '').trim();
+
+  // Basic validation for From Email
+  if (!fromEmail.includes('@') || !fromEmail.includes('.')) {
+      console.warn(`Invalid EMAIL_FROM format (${fromEmail}), reverting to default.`);
+      fromEmail = 'Aurora News <onboarding@resend.dev>';
+  }
 
   if (!resendApiKey) {
     return response.status(500).json({ error: 'Server configuration error: Missing Resend API Key' });
@@ -48,7 +58,13 @@ export default async function handler(request, response) {
 
     if (!resendRes.ok) {
       const errorText = await resendRes.text();
-      throw new Error(`Resend API rejected: ${errorText}`);
+      // Parse JSON error if possible to be cleaner
+      try {
+          const errObj = JSON.parse(errorText);
+          throw new Error(`Resend Error: ${errObj.message || errorText}`);
+      } catch (e) {
+          throw new Error(`Resend API rejected: ${errorText}`);
+      }
     }
 
     const data = await resendRes.json();

@@ -17,17 +17,11 @@ const parseUrlConfig = (urlStr?: string) => {
   url = url.replace(/\/$/, '');
 
   // Critical Fix: Most OpenAI compatible proxies (NewAPI/OneAPI) mount at /v1
-  // If the URL doesn't end with /v1, we append it to ensure we hit the API and not the dashboard HTML.
-  // Exception: If the user deliberately typed a path that isn't v1 (e.g. /v1beta), we might break it, 
-  // but standardizing on /v1 is the safest bet for the "New API" error observed.
   if (!url.match(/\/v1(\/|$)/) && !url.includes('/api/')) {
-       // Check if it already has a version-like suffix? 
-       // Simplest robust logic: if it doesn't end in v1, append it.
        if (!url.endsWith('/v1')) {
            url = `${url}/v1`;
        }
   } else if (url.endsWith('/')) {
-       // Cleanup if regex missed it
        url = url.slice(0, -1);
   }
   
@@ -42,9 +36,6 @@ export const connectToOpenAI = async (config: UserConfig): Promise<{ id: string,
     
     if (!apiKey) throw new Error("缺少 API Key");
 
-    // Try standard OpenAI listing
-    // Note: Some proxies mount at /v1/models, some at /models.
-    // parseUrlConfig now ensures baseUrl ends in /v1 (mostly)
     let targetUrl = `${baseUrl}/models`;
 
     try {
@@ -82,7 +73,6 @@ export const connectToOpenAI = async (config: UserConfig): Promise<{ id: string,
             .sort((a, b) => a.id.localeCompare(b.id));
 
     } catch (error: any) {
-         // If direct fetch fails, we might try the proxy endpoint on our backend to bypass CORS
          if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
             console.warn(`[Connection] Direct fetch failed (CORS?), trying proxy...`);
             return connectViaProxy(baseUrl, apiKey);
@@ -132,11 +122,10 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
 
     const { baseUrl } = parseUrlConfig(config?.baseUrl);
     
-    // Initialize OpenAI SDK
     const client = new OpenAI({
         apiKey: apiKey,
         baseURL: baseUrl,
-        dangerouslyAllowBrowser: true // Required for client-side usage
+        dangerouslyAllowBrowser: true
     });
     
     const userModelId = config?.modelId || PRIMARY_MODEL;
@@ -170,39 +159,63 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
     `;
 
     const systemPrompt = `
-      你是一位专业的资深新闻编辑和双语内容创作者。
+      You are a senior news editor and bilingual content creator.
       
-      任务：
-      1. 搜索/回顾昨日（${targetDate}）的新闻。
-      2. 精选 6 条重大的全球/政治/经济新闻。
-      3. 精选 6 条重大的医学/健康/科学文献突破。
+      CRITICAL INSTRUCTION:
+      You MUST retrieve REAL news from the internet for the date: ${targetDate}.
+      DO NOT HALLUCINATE. DO NOT MAKE UP NEWS.
+      If you cannot access the internet or search tools, or if you cannot find news for this specific date, return an error JSON or state "OFFLINE_MODE".
       
-      要求：
-      - 必须提供真实、可访问的 source_url。
-      - 为医学板块生成 3 个小红书风格爆款标题 (medical_viral_titles)。
-      - 为时政板块生成 3 个小红书风格爆款标题 (viral_titles)。
-      - 双语对应。
+      Task:
+      1. Search/Review ACTUAL global news and medical breakthroughs from YESTERDAY (${targetDate}).
+      2. Select 6 major Global/Politics/Economy stories.
+      3. Select 6 major Medical/Health/Science stories.
       
-      IMPORTANT: You must output ONLY valid JSON matching the following structure. Do not include markdown formatting like \`\`\`json.
+      Requirements:
+      - 'source_url' MUST be a real, valid URL. Do not invent URLs.
+      - 'source_name' must be the actual publisher (e.g., Reuters, CNN, Nature).
+      - Titles must be catchy (Xiaohongshu style) but FACTUAL.
+      - Bilingual (CN/EN).
+      
+      IMPORTANT: Output ONLY valid JSON.
       ${jsonStructure}
     `;
+
+    // Helper to determine if we should inject Google Tools
+    const isGemini = userModelId.toLowerCase().includes('gemini');
 
     // Retry Helper
     const attemptGenerate = async (mId: string, retryLevel = 0): Promise<GeneratedContent> => {
         try {
             console.log(`Generating with ${mId} via ${baseUrl}...`);
             
-            const completion = await client.chat.completions.create({
+            const requestOptions: any = {
                 model: mId,
                 messages: [
                     { role: "system", content: systemPrompt },
-                    { role: "user", content: `Generate daily briefing for ${targetDate}` }
+                    { role: "user", content: `Search for real news on ${targetDate} and generate the briefing.` }
                 ],
-                response_format: { type: "json_object" }, // Force JSON mode
+                response_format: { type: "json_object" },
                 temperature: 0.7,
-            });
+            };
 
-            // SAFETY CHECK: Ensure choices exist
+            // Inject Google Search Tool if it's a Gemini model
+            // This relies on the Proxy passing the 'tools' payload correctly to Google
+            if (isGemini) {
+                requestOptions.tools = [
+                    {
+                        type: "function",
+                        function: {
+                            name: "google_search_retrieval",
+                            description: "Access Google Search to find real-time information.",
+                            parameters: { type: "object", properties: {} }
+                        }
+                    }
+                ];
+            }
+
+            const completion = await client.chat.completions.create(requestOptions);
+
             if (!completion || !completion.choices || completion.choices.length === 0) {
                 console.error("Invalid Response Structure:", completion);
                 throw new Error("Model response invalid: 'choices' field missing. The proxy might be returning an error or malformed data.");
@@ -211,7 +224,17 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             const contentStr = completion.choices[0].message.content;
             if (!contentStr) throw new Error("Empty response content from model");
             
-            return JSON.parse(contentStr);
+            const parsed = JSON.parse(contentStr);
+            
+            // Simple validation check for hallucinations (empty URLs or generic placeholders)
+            if (parsed.general_news && parsed.general_news.length > 0) {
+                const sampleUrl = parsed.general_news[0].source_url;
+                if (!sampleUrl || sampleUrl.includes("example.com") || sampleUrl === "String") {
+                    throw new Error("Model detected to be hallucinating (Fake URLs). Please use a model with Internet Access.");
+                }
+            }
+
+            return parsed;
 
         } catch (e: any) {
             const msg = e.message || JSON.stringify(e);
@@ -226,9 +249,10 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             const isNotFound = msg.includes('404') || msg.includes('NOT_FOUND') || msg.includes('model_not_found');
             const isAuthError = msg.includes('401') || msg.includes('403');
             const isMalformed = msg.includes("'choices' field missing");
+            const isHallucination = msg.includes("hallucinating");
             
             // Logic for fallbacks
-            if (isNotFound || isAuthError || isMalformed || retryLevel < 2) {
+            if (isNotFound || isAuthError || isMalformed || isHallucination || retryLevel < 2) {
                 if (retryLevel === 0 && mId !== FALLBACK_MODEL) {
                      console.warn(`Model ${mId} failed. Trying fallback 1: ${FALLBACK_MODEL}`);
                      return attemptGenerate(FALLBACK_MODEL, 1);
