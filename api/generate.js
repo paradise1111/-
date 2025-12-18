@@ -117,13 +117,23 @@ export default async function handler(request, response) {
             const requestOptions = {
                 model: mId,
                 messages: [
-                    { role: "system", content: `You are a News Aggregator. Summarize Public Health & General News for ${date}. 
+                    { role: "system", content: `You are a News Aggregator. 
+                    MANDATORY: Use the SEARCH TOOL to find real news for ${date}. 
+                    DO NOT generate fake data. If search fails, return empty arrays (will trigger error).
                     Output strictly Valid JSON. Escape quotes. Limit 4 items per list.` },
-                    { role: "user", content: `Generate news briefing for ${date}` }
+                    { role: "user", content: `Use Google Search to find news for ${date}` }
                 ],
                 max_tokens: 8192,
-                temperature: 0.3,
-                response_format: { type: "json_object" }
+                temperature: 0.1,
+                // INJECT TOOL DEFINITION
+                tools: [{
+                    type: "function",
+                    function: {
+                        name: "googleSearch",
+                        description: "Search the internet for real-time news.",
+                        parameters: { type: "object", properties: {} }
+                    }
+                }]
             };
             
             const completion = await client.chat.completions.create(requestOptions);
@@ -145,15 +155,7 @@ export default async function handler(request, response) {
                  }
                  throw new Error("Upstream Rate Limit Exceeded.");
              }
-             // Handle 400 Bad Request (often unsupported response_format)
-             if (msg.includes("400") || msg.includes("response_format")) {
-                 if (retryLevel < 1) {
-                     // Retry with fallback and NO response_format? Or same model no format?
-                     // Let's try same model, simplified
-                     return attempt(mId, 1); // Logic needs refining but simplified for now
-                 }
-             }
-
+             
              if (retryLevel === 0 && mId !== fallbackModel) {
                  return attempt(fallbackModel, 1);
              }

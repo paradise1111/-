@@ -87,6 +87,7 @@ export default async function handler(request, response) {
     const prompt = `
       Task: Search for ${targetDateStr} news.
       SAFETY: Report Public Health news only. No medical advice.
+      MANDATORY: USE GOOGLE SEARCH TOOL. Do not hallucinate.
       Output: Valid JSON. Limit 4 items per list.
       Structure: ${jsonStructure}
     `;
@@ -97,8 +98,16 @@ export default async function handler(request, response) {
         model: modelId,
         messages: [{ role: "user", content: prompt }],
         max_tokens: 8192,
-        temperature: 0.3,
-        response_format: { type: "json_object" }
+        temperature: 0.1,
+        // INJECT TOOL DEFINITION
+        tools: [{
+            type: "function",
+            function: {
+                name: "googleSearch",
+                description: "Search the internet for real-time news.",
+                parameters: { type: "object", properties: {} }
+            }
+        }]
     };
 
     const completion = await client.chat.completions.create(requestOptions);

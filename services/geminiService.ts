@@ -120,18 +120,19 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
 
     const client = new OpenAI({ apiKey, baseURL: baseUrl, dangerouslyAllowBrowser: true });
 
-    // Enhanced System Prompt for Safety & JSON Stability
+    // Enhanced System Prompt: STRICT NETWORK SEARCH REQUIRED
     const systemPrompt = `You are a professional News Aggregator. 
-    Task: Search for public news articles from ${targetDate}.
+    Task: Search for REAL-TIME news for ${targetDate}.
     
-    SAFETY GUIDELINES:
-    1. Summarize public health news ONLY. DO NOT provide medical advice.
-    2. If sensitive topics arise, stick to factual reporting from reputable sources.
+    MANDATORY RULES:
+    1. USE THE SEARCH TOOL. You MUST use internet search to find confirmed news.
+    2. NO FAKE DATA. Do not generate "Demo" or "Example" data. If you cannot find news, return an error in the summary.
+    3. TARGET: Public health updates & Global major events.
     
-    FORMATTING RULES:
+    FORMATTING:
     1. Output strictly Valid JSON.
-    2. LIMIT to 4 items per category to ensure completeness.
-    3. Escape all quotes (\\") and newlines (\\n) in strings.`;
+    2. Escape all quotes (\\") and newlines (\\n).
+    3. No Markdown.`;
 
     const jsonStructure = `{ "viral_titles": [], "medical_viral_titles": [], "general_news": [], "medical_news": [], "date": "${targetDate}" }`;
 
@@ -143,11 +144,20 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                 model: mId,
                 messages: [
                     { role: "system", content: systemPrompt },
-                    { role: "user", content: `Retrieve REAL news for ${targetDate}. Return JSON matching: ${jsonStructure}` }
+                    { role: "user", content: `Use Google Search to find news for ${targetDate}. Return JSON: ${jsonStructure}` }
                 ],
-                temperature: 0.3,
-                max_tokens: 8192, // Maximize token limit
-                response_format: { type: "json_object" } // Force JSON mode
+                temperature: 0.1, // Low temperature for factual accuracy
+                max_tokens: 8192,
+                // INJECT GOOGLE SEARCH TOOL DEFINITION
+                // This payload works with many OpenAI-to-Gemini proxies to trigger Grounding
+                tools: [{
+                    type: "function",
+                    function: {
+                        name: "googleSearch",
+                        description: "Search the internet for real-time news and information.",
+                        parameters: { type: "object", properties: {} }
+                    }
+                }]
             };
 
             const completion = await client.chat.completions.create(options);
@@ -161,7 +171,7 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             
             if (!content) {
                 if (choice.message?.refusal) throw new Error(`Model Refusal: ${choice.message.refusal}`);
-                throw new Error(`API returned an empty body.`);
+                throw new Error(`API returned an empty body. Ensure your model supports Search.`);
             }
 
             // Extract and Repair JSON
@@ -170,20 +180,20 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             try {
                 const parsed = JSON.parse(jsonStr);
                 
-                // Fallback: If array is empty, ensure it exists
+                // Final Check: If arrays are empty, it means Search FAILED.
+                const hasData = parsed.general_news?.length > 0 || parsed.viral_titles?.length > 0;
+                if (!hasData) {
+                    throw new Error("Search returned no results. Please check network connectivity or API permissions.");
+                }
+
                 if (!parsed.general_news) parsed.general_news = [];
                 if (!parsed.medical_news) parsed.medical_news = [];
                 if (!parsed.viral_titles) parsed.viral_titles = [];
                 
                 return parsed;
-            } catch (jsonErr) {
+            } catch (jsonErr: any) {
+                if (jsonErr.message.includes("Search returned no results")) throw jsonErr;
                 console.error("JSON Parse Error. Content:", jsonStr.substring(0, 150));
-                
-                // If it's short and fails, it's likely a text refusal like "I cannot..."
-                if (jsonStr.length < 50 && !jsonStr.includes('{')) {
-                    throw new Error(`Model Refusal: ${jsonStr}`);
-                }
-
                 throw new Error("Failed to parse model output as JSON (Syntax Error).");
             }
 
@@ -198,22 +208,20 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                     await new Promise(r => setTimeout(r, waitTime));
                     return attempt(mId, retryCount + 1);
                 }
+                // Don't fallback to flash/gpt if we NEED search, unless they also support it.
+                // Assuming flash also supports search (it does on Gemini).
                 if (mId === PRIMARY_MODEL) return attempt(FALLBACK_MODEL, 0);
             }
 
-            // If "response_format" is not supported by the provider, retry without it
-            if (e.message.includes("'response_format'") || e.message.includes("400")) {
-                 console.log("Retrying without response_format...");
-                 // Recursive call with same model but we need a flag to avoid infinite loop. 
-                 // For simplicity, just failover to fallback model which might be more standard.
-                 if (mId === PRIMARY_MODEL) return attempt(FALLBACK_MODEL, 1);
+            // If the error implies tools are not supported (400), we might be stuck
+            if (e.message.includes("tools") || e.message.includes("400")) {
+                console.warn("Model does not support tools via this endpoint.");
+                // We throw here because user demanded "MUST BE NETWORKED"
+                throw new Error("Your API Endpoint does not support Search Tools. Please use a compatible Gemini provider.");
             }
 
             if (retryCount === 0 && mId === PRIMARY_MODEL) {
                  return attempt(FALLBACK_MODEL, 1);
-            }
-            if (retryCount === 0 && mId === FALLBACK_MODEL) {
-                 return attempt(SECONDARY_FALLBACK_MODEL, 1);
             }
 
             throw new Error(e.message || "Request failed.");
