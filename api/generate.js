@@ -14,10 +14,21 @@ export default async function handler(request, response) {
     return;
   }
 
-  // 1. 获取配置：优先使用 Header 中的自定义配置，其次使用环境变量
-  const customApiKey = request.headers['x-custom-api-key'];
-  const customBaseUrl = request.headers['x-custom-base-url'];
-  const customModel = request.headers['x-custom-model'];
+  // Helper to safely decode headers
+  const getHeader = (key) => {
+    const val = request.headers[key];
+    if (!val) return undefined;
+    try {
+        return decodeURIComponent(val);
+    } catch (e) {
+        return val; // Fallback to raw value if decoding fails
+    }
+  };
+
+  // 1. 获取配置：优先使用 Header 中的自定义配置 (解码后)，其次使用环境变量
+  const customApiKey = getHeader('x-custom-api-key');
+  const customBaseUrl = getHeader('x-custom-base-url');
+  const customModel = getHeader('x-custom-model');
 
   let apiKey = customApiKey || process.env.API_KEY;
   
@@ -25,7 +36,7 @@ export default async function handler(request, response) {
     return response.status(500).json({ error: "Configuration Error: API_KEY is missing (Server env or Custom header)." });
   }
 
-  // 清洗 API Key
+  // 清洗 API Key (移除可能存在的引号)
   apiKey = apiKey.trim();
   if ((apiKey.startsWith('"') && apiKey.endsWith('"')) || (apiKey.startsWith("'") && apiKey.endsWith("'"))) {
     apiKey = apiKey.slice(1, -1);

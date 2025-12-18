@@ -5,12 +5,17 @@ import { GeneratedContent, UserConfig } from "../types";
 export const PRIMARY_MODEL = 'gemini-3-pro-preview';
 export const FALLBACK_MODEL = 'gemini-3-flash-preview'; 
 
+// Helper to safely encode headers (handles Chinese/Special chars)
+const safeEncode = (val?: string) => val ? encodeURIComponent(val.trim()) : undefined;
+
 export const checkConnectivity = async (config?: UserConfig): Promise<boolean> => {
   try {
     const headers: Record<string, string> = {};
-    if (config?.apiKey) headers['x-custom-api-key'] = config.apiKey;
-    if (config?.baseUrl) headers['x-custom-base-url'] = config.baseUrl;
-    if (config?.modelId) headers['x-custom-model'] = config.modelId;
+    
+    // Encode values to prevent "String contains non ISO-8859-1 code point" error
+    if (config?.apiKey) headers['x-custom-api-key'] = safeEncode(config.apiKey)!;
+    if (config?.baseUrl) headers['x-custom-base-url'] = safeEncode(config.baseUrl)!;
+    if (config?.modelId) headers['x-custom-model'] = safeEncode(config.modelId)!;
 
     // 调用后端 API 进行连通性检查
     const response = await fetch('/api/generate?check=true', { headers });
@@ -29,9 +34,11 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
   };
-  if (config?.apiKey) headers['x-custom-api-key'] = config.apiKey;
-  if (config?.baseUrl) headers['x-custom-base-url'] = config.baseUrl;
-  if (config?.modelId) headers['x-custom-model'] = config.modelId;
+  
+  // Encode values to prevent "String contains non ISO-8859-1 code point" error
+  if (config?.apiKey) headers['x-custom-api-key'] = safeEncode(config.apiKey)!;
+  if (config?.baseUrl) headers['x-custom-base-url'] = safeEncode(config.baseUrl)!;
+  if (config?.modelId) headers['x-custom-model'] = safeEncode(config.modelId)!;
 
   // 调用后端 API 进行生成
   const response = await fetch('/api/generate', {
