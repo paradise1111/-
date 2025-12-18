@@ -1,9 +1,8 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 
-// 这是一个 Serverless Function，运行在服务器端，可以安全访问 API Key
 export default async function handler(request, response) {
-  // 设置 CORS 头部，允许前端调用
+  // 设置 CORS 头部
   response.setHeader('Access-Control-Allow-Credentials', true);
   response.setHeader('Access-Control-Allow-Origin', '*');
   response.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
@@ -14,84 +13,92 @@ export default async function handler(request, response) {
     return;
   }
 
-  // Helper to safely decode headers
+  // Helper: Decode Headers
   const getHeader = (key) => {
     const val = request.headers[key];
     if (!val) return undefined;
-    try {
-        return decodeURIComponent(val);
-    } catch (e) {
-        return val; // Fallback to raw value if decoding fails
-    }
+    try { return decodeURIComponent(val); } catch (e) { return val; }
   };
 
-  // 1. 获取配置
+  const sanitizeModelName = (name) => {
+      if (!name) return name;
+      if (/[^a-zA-Z0-9.\-_]/.test(name)) return encodeURIComponent(name);
+      return name;
+  };
+
   const customApiKey = getHeader('x-custom-api-key');
   const customBaseUrl = getHeader('x-custom-base-url');
   const customModel = getHeader('x-custom-model');
 
   let apiKey = customApiKey || process.env.API_KEY;
+  if (!apiKey) return response.status(400).json({ error: "Configuration Error: API_KEY is missing." });
   
-  if (!apiKey) {
-    return response.status(500).json({ error: "Configuration Error: API_KEY is missing (Server env or Custom header)." });
-  }
+  apiKey = apiKey.trim().replace(/^['"]|['"]$/g, '');
 
-  // 清洗 API Key
-  apiKey = apiKey.trim();
-  if ((apiKey.startsWith('"') && apiKey.endsWith('"')) || (apiKey.startsWith("'") && apiKey.endsWith("'"))) {
-    apiKey = apiKey.slice(1, -1);
-  }
-
-  // 2. 初始化 SDK
-  const clientOptions = { apiKey };
+  let baseUrl = 'https://generativelanguage.googleapis.com';
   if (customBaseUrl && customBaseUrl.trim() !== '') {
     let url = customBaseUrl.trim();
     if (!url.startsWith('http')) url = `https://${url}`;
-    // 去掉末尾的 /，防止双重斜杠问题
-    if (url.endsWith('/')) url = url.slice(0, -1);
-    clientOptions.baseUrl = url;
+    url = url.replace(/\/$/, '').replace(/\/v1beta\/?$/, '').replace(/\/v1\/?$/, '');
+    baseUrl = url;
   }
 
-  const ai = new GoogleGenAI(clientOptions);
-  
-  // 模型配置
-  const PRIMARY_MODEL = customModel || process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
-  const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL_ID || 'gemini-3-flash-preview';
-
-  // Helper: 安全处理模型名称
-  // 如果模型名称包含特殊字符（如 [] 或中文），而 SDK 没有进行编码，可能会导致 HTTP 400 错误。
-  // 我们检测如果包含非URL安全字符，则进行编码。
-  const sanitizeModelName = (name) => {
-      if (!name) return name;
-      // 检查是否包含除了字母、数字、点、横线、下划线以外的字符
-      if (/[^a-zA-Z0-9.\-_]/.test(name)) {
-          console.log(`Model name '${name}' contains special characters. Applying URI encoding.`);
-          return encodeURIComponent(name);
-      }
-      return name;
-  };
-
-  // --- 模式 1: 连通性检查 (GET) ---
-  if (request.method === 'GET' && request.query.check === 'true') {
+  // --- 模式 1: 代理获取模型列表 (类似 Tavern 的后端代理) ---
+  if (request.method === 'GET' && request.query.action === 'list_models') {
     try {
-      const safeModel = sanitizeModelName(PRIMARY_MODEL);
-      await ai.models.generateContent({
-        model: safeModel,
-        contents: 'ping',
+      // 强制使用 OpenAI 标准路径 /v1/models
+      // 这是中转站通用的标准
+      const targetUrl = `${baseUrl}/v1/models`;
+      console.log(`[Proxy List] Forwarding to: ${targetUrl}`);
+
+      const proxyRes = await fetch(targetUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        }
       });
-      return response.status(200).json({ success: true, model: PRIMARY_MODEL });
+
+      if (!proxyRes.ok) {
+        const errText = await proxyRes.text();
+        return response.status(proxyRes.status).json({ error: `Upstream Error: ${errText}` });
+      }
+
+      const data = await proxyRes.json();
+      
+      // 确保返回格式统一为 { models: [{id: ...}] }
+      let models = [];
+      if (data.data) models = data.data;
+      else if (data.models) models = data.models;
+      else if (Array.isArray(data)) models = data;
+
+      return response.status(200).json({ success: true, models: models });
+
     } catch (error) {
-      console.error("Connectivity check failed:", error);
-      // 返回详细错误
-      return response.status(500).json({ success: false, error: error.toString() });
+      console.error("List Proxy Failed:", error);
+      return response.status(500).json({ error: error.message });
     }
   }
 
-  // --- 模式 2: 生成简报 (POST) ---
+  // --- 模式 2: 连通性检查 (Ping) ---
+  if (request.method === 'GET' && request.query.check === 'true') {
+    // 这里的 check 主要是给 UI 用的简单 Ping
+    return response.status(200).json({ success: true, msg: "Backend Online" });
+  }
+
+  // --- 模式 3: 生成简报 (POST) ---
   if (request.method === 'POST') {
     try {
       const { date } = request.body;
       if (!date) return response.status(400).json({ error: "Date is required" });
+
+      // 初始化 SDK
+      // Google SDK 默认会追加 /v1beta/models...
+      // 大多数 OneAPI 中转站能兼容 Google SDK 的请求结构
+      const ai = new GoogleGenAI({ apiKey, baseUrl, apiVersion: 'v1beta' });
+      
+      const modelId = customModel || process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
+      const safeModel = sanitizeModelName(modelId);
 
       const newsItemSchema = {
         type: Type.OBJECT,
@@ -118,75 +125,30 @@ export default async function handler(request, response) {
 
       const prompt = `
         你是一位专业的资深新闻编辑和双语内容创作者。
-        任务：
-        1. 搜索昨日（${date}）的新闻。
-        2. 精选 6 条重大的全球/政治/经济新闻。
-        3. 精选 6 条重大的医学/健康/科学文献突破。
-        关键要求：
-        - 必须使用 Google Search 工具。
-        - 必须提供真实、可访问的 source_url。
-        - 为医学板块生成 3 个小红书风格爆款标题 (medical_viral_titles)。
-        - 为时政板块生成 3 个小红书风格爆款标题 (viral_titles)。
-        - 双语对应。
+        任务：搜索昨日（${date}）的新闻，精选 6 条全球时政新闻和 6 条医学文献突破。
+        要求：使用 Google Search，提供 source_url，双语对应，生成爆款标题。
       `;
 
-      // 内部函数：执行生成
-      const executeGeneration = async (modelName, useThinking, retries = 0) => {
-        try {
-          // 应用 URL 编码以修复 [channel] 格式的 400 错误
-          const safeModel = sanitizeModelName(modelName);
-
-          console.log(`Generating with model: ${safeModel} (raw: ${modelName}), thinking: ${useThinking}`);
-          const config = {
-            tools: [{ googleSearch: {} }],
-            responseMimeType: "application/json",
-            responseSchema: responseSchema,
-          };
-          
-          if (useThinking) {
-             config.thinkingConfig = { thinkingBudget: 1024 };
-          }
-
-          const result = await ai.models.generateContent({
-            model: safeModel,
-            contents: prompt,
-            config: config,
-          });
-
-          return JSON.parse(result.text);
-        } catch (err) {
-          if (retries > 0) {
-            console.warn(`Retry needed for ${modelName}. Error: ${err.message}. Remaining: ${retries - 1}`);
-            await new Promise(r => setTimeout(r, 1000));
-            return executeGeneration(modelName, false, retries - 1);
-          }
-          throw err;
-        }
+      const genConfig = {
+        tools: [{ googleSearch: {} }],
+        responseMimeType: "application/json",
+        responseSchema: responseSchema,
       };
 
-      // 稳定性策略
-      let data;
-      try {
-        const isNative = PRIMARY_MODEL.includes('gemini-3') || PRIMARY_MODEL.includes('gemini-2.5');
-        data = await executeGeneration(PRIMARY_MODEL, isNative, 0);
-      } catch (e1) {
-        console.warn("Primary attempt failed, retrying without thinking...", e1);
-        try {
-            data = await executeGeneration(PRIMARY_MODEL, false, 1);
-        } catch (e2) {
-            console.warn("Primary model failed completely, switching to fallback...", e2);
-            // 这里 Fallback 模型通常是标准的 'gemini-3-flash-preview'，不需要编码
-            data = await executeGeneration(FALLBACK_MODEL, false, 1);
-        }
-      }
+      console.log(`Generating via Backend Proxy: ${safeModel} @ ${baseUrl}`);
 
-      return response.status(200).json(data);
+      const result = await ai.models.generateContent({
+        model: safeModel,
+        contents: prompt,
+        config: genConfig,
+      });
+
+      return response.status(200).json(JSON.parse(result.text));
 
     } catch (error) {
-      console.error("Generation API Failed:", error);
-      // 透传上游错误信息
+      console.error("Generation Failed:", error);
       const errorMsg = error.response ? JSON.stringify(error.response) : error.message;
-      return response.status(500).json({ error: errorMsg || "Internal Server Error" });
+      return response.status(500).json({ error: errorMsg });
     }
   }
 

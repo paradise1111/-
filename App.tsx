@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Activity, Globe, HeartPulse, RefreshCw, Server, ShieldCheck, Sparkles, Mail, Clock, Send, Stethoscope, AlertTriangle, Settings } from 'lucide-react';
 import { GlassCard } from './components/GlassCard';
@@ -58,44 +59,62 @@ export default function App() {
     const savedConfig = localStorage.getItem('aurora_config');
     if (savedConfig) {
       try {
-        setUserConfig(JSON.parse(savedConfig));
+        const parsed = JSON.parse(savedConfig);
+        setUserConfig(parsed);
+        // Only init connection after loading config
+        initConnection(parsed);
       } catch (e) {
         console.error("Failed to parse saved config", e);
+        initConnection({});
       }
+    } else {
+        initConnection({});
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSaveConfig = (newConfig: UserConfig) => {
     setUserConfig(newConfig);
     localStorage.setItem('aurora_config', JSON.stringify(newConfig));
     addLog("配置已更新。正在重新建立连接...");
-    // 重新触发连接检查
     initConnection(newConfig);
   };
 
   const initConnection = async (config: UserConfig) => {
     setStatus(AppStatus.CONNECTING);
     const modelName = config.modelId || PRIMARY_MODEL;
-    addLog(`正在初始化与 AI 网关的连接... 目标模型: ${modelName}`);
+    addLog(`正在初始化连接...`);
+    
     if (config.baseUrl) {
-        addLog(`使用自定义网关: ${config.baseUrl}`);
+        addLog(`🌐 使用自定义网关: ${config.baseUrl}`);
+    } else {
+        addLog(`🌐 使用 Google 官方 API (未配置 Base URL)`);
+    }
+
+    if (config.apiKey) {
+        addLog(`🔑 使用自定义 API Key: ${config.apiKey.substring(0, 8)}...`);
+    } else {
+        addLog(`🔑 使用服务器预设 API Key`);
     }
     
     const isConnected = await checkConnectivity(config);
     if (isConnected) {
       setStatus(AppStatus.IDLE);
-      addLog(`握手成功。通信链路正常。当前节点: ${modelName}`);
+      addLog(`✅ 握手成功。模型 ${modelName} 在线。`);
     } else {
       setStatus(AppStatus.ERROR);
-      addLog(`严重错误: 无法连接至模型 ${modelName}。请检查 API Key / Base URL 设置。`);
+      addLog(`❌ 连接失败。无法访问模型 ${modelName}。`);
+      if (config.apiKey && !config.baseUrl) {
+          addLog(`⚠️ 警告: 检测到您使用了自定义 Key 但未配 Base URL。`);
+          addLog(`>>> 正在打开设置面板...`);
+          setTimeout(() => setIsSettingsOpen(true), 1500);
+      } else if (!config.apiKey) {
+          // If no key provided and default fails
+          addLog(`>>> 请在设置中配置有效的 API Key 和 Base URL。`);
+          setTimeout(() => setIsSettingsOpen(true), 1500);
+      }
     }
   };
-
-  useEffect(() => {
-    // Initial Connectivity Check
-    initConnection(userConfig);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // Scheduler Effect
   useEffect(() => {
@@ -152,7 +171,7 @@ export default function App() {
       
       setData(result);
       setStatus(AppStatus.COMPLETED);
-      addLog("序列完成。内容已准备就绪。");
+      addLog("✅ 序列完成。内容已准备就绪。");
 
       if (isAutoRun) {
         await executeEmailSend(result, true);
@@ -162,19 +181,19 @@ export default function App() {
       console.error(e);
       setStatus(AppStatus.ERROR);
       
-      // 显示真实错误，方便调试
       let errorMsg = e.message || "未知错误";
-      
-      // 仍然保留一些基本提示，但附加原始错误
-      if (errorMsg.includes("400")) {
-        errorMsg = `请求被拒绝 (400)。原因: ${errorMsg}`;
+      if (errorMsg.includes("400") || errorMsg.includes("API key not valid")) {
+        errorMsg = `认证失败 (400)。Key 无效或 Base URL 缺失。`;
       } else if (errorMsg.includes("404")) {
-         errorMsg = `资源未找到 (404)。模型 ID 可能错误: ${errorMsg}`;
-      } else if (errorMsg.includes("401") || errorMsg.includes("403")) {
-          errorMsg = `权限错误 (401/403)。API Key 无效: ${errorMsg}`;
+         errorMsg = `模型未找到 (404)。请尝试在设置中切换为 gemini-1.5-pro`;
       }
 
-      addLog(`❌ 生成过程中出错: ${errorMsg}`);
+      addLog(`❌ 生成出错: ${errorMsg}`);
+      
+      // Auto-open settings on generation error too
+      if (errorMsg.includes("400") || errorMsg.includes("404")) {
+         setTimeout(() => setIsSettingsOpen(true), 2000);
+      }
     }
   };
 
