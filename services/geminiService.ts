@@ -17,12 +17,21 @@ const parseUrlConfig = (urlStr?: string) => {
   return { baseUrl: url };
 };
 
-// Helper: Clean JSON string from Markdown code blocks
-const cleanJsonString = (str: string): string => {
+// Helper: Surgically extract JSON object from text
+// This is more robust than cleaning Markdown because it ignores conversational filler before/after the JSON.
+const extractJson = (str: string): string => {
   if (!str) return "";
-  // Remove ```json ... ``` or ``` ... ``` wrappers
-  let cleaned = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
-  return cleaned.trim();
+  
+  const firstOpen = str.indexOf('{');
+  const lastClose = str.lastIndexOf('}');
+  
+  // If we found a pair of braces, extract everything in between
+  if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+    return str.substring(firstOpen, lastClose + 1);
+  }
+  
+  // Fallback: If no braces found, try cleaning markdown just in case (though unlikely to work if braces are missing)
+  return str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
 };
 
 export const connectToOpenAI = async (config: UserConfig): Promise<{ id: string, name?: string }[]> => {
@@ -64,13 +73,14 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
 
     const client = new OpenAI({ apiKey, baseURL: baseUrl, dangerouslyAllowBrowser: true });
 
-    // Enhanced System Prompt to enforce JSON without relying on response_format parameter
+    // Enhanced System Prompt
     const systemPrompt = `You are a professional news editor. 
     Task: Search for REAL news from ${targetDate}. 
     Rules:
     1. NO Hallucinations. Verify links.
-    2. Output strictly Valid JSON only. No Markdown formatting, no commentary.
-    3. Content must be bilingual (Chinese/English).`;
+    2. Output strictly Valid JSON only. 
+    3. DO NOT use Markdown code blocks (no \`\`\`json). Just return the raw JSON string.
+    4. Content must be bilingual (Chinese/English).`;
 
     const jsonStructure = `{ "viral_titles": [], "medical_viral_titles": [], "general_news": [], "medical_news": [], "date": "${targetDate}" }`;
 
@@ -82,12 +92,10 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                 model: mId,
                 messages: [
                     { role: "system", content: systemPrompt },
-                    { role: "user", content: `Retrieve REAL news for ${targetDate}. Required JSON Format: ${jsonStructure}` }
+                    { role: "user", content: `Retrieve REAL news for ${targetDate}. JSON format required: ${jsonStructure}` }
                 ],
-                // REMOVED: response_format: { type: "json_object" } 
-                // Reason: Many Gemini proxies fail with this flag. We use prompt engineering + cleaning instead.
                 temperature: 0.7,
-                max_tokens: 3500
+                max_tokens: 4096 // Increased limit to prevent JSON truncation
             };
 
             // Inject tools if it's a Gemini model
@@ -113,25 +121,28 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             let content = choice.message?.content;
             
             if (!content) {
-                // If content is empty but refusal exists (OpenAI standard)
                 if (choice.message?.refusal) {
                     throw new Error(`Model Refusal: ${choice.message.refusal}`);
                 }
                 throw new Error(`API returned an empty body. Finish Reason: ${choice.finish_reason}`);
             }
 
-            // Clean Markdown wrappers
-            content = cleanJsonString(content);
+            // Surgically extract JSON
+            const jsonStr = extractJson(content);
             
             try {
-                const parsed = JSON.parse(content);
+                const parsed = JSON.parse(jsonStr);
                 // Basic validation
                 if (!parsed.general_news && !parsed.viral_titles) {
                     throw new Error("JSON parsed but missing key fields.");
                 }
                 return parsed;
             } catch (jsonErr) {
-                console.error("JSON Parse Error. Raw content:", content);
+                console.error("JSON Parse Error. Extracted content:", jsonStr);
+                // If parsing fails, it might be truncated.
+                if (choice.finish_reason === 'length') {
+                    throw new Error("News content too long and JSON was truncated. Please try again.");
+                }
                 throw new Error("Failed to parse model output as JSON.");
             }
 
@@ -139,7 +150,7 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             const status = e.status || (e.message?.match(/\d{3}/)?.[0]);
             console.warn(`Error with ${mId}:`, e.message);
 
-            // 429 Handling with Exponential Backoff
+            // 429 Handling
             if (status == 429 || e.message.includes("429")) {
                 if (retryCount < 3) {
                     const waitTime = Math.pow(2, retryCount + 1) * 1000;
@@ -147,12 +158,11 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                     await new Promise(r => setTimeout(r, waitTime));
                     return attempt(mId, retryCount + 1);
                 }
-                
                 if (mId === PRIMARY_MODEL) return attempt(FALLBACK_MODEL, 0);
                 if (mId === FALLBACK_MODEL) return attempt(SECONDARY_FALLBACK_MODEL, 0);
             }
 
-            // Fallback for logic errors (Empty body, JSON parse fail)
+            // Fallback for logic errors (JSON parse fail, etc)
             if (retryCount === 0) {
                 if (mId === PRIMARY_MODEL) return attempt(FALLBACK_MODEL, 1);
             }

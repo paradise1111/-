@@ -12,11 +12,15 @@ export default async function handler(request, response) {
     return response.status(200).end();
   }
 
-  // Helper
-  const cleanJsonString = (str) => {
+  // Helper: Surgically extract JSON
+  const extractJson = (str) => {
     if (!str) return "";
-    let cleaned = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
-    return cleaned.trim();
+    const firstOpen = str.indexOf('{');
+    const lastClose = str.lastIndexOf('}');
+    if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+      return str.substring(firstOpen, lastClose + 1);
+    }
+    return str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
   };
 
   const getHeader = (key) => {
@@ -89,10 +93,10 @@ export default async function handler(request, response) {
             const requestOptions = {
                 model: mId,
                 messages: [
-                    { role: "system", content: `You are an editor. Search real news for ${date}. No hallucinations. Output Strictly Valid JSON only. No Markdown.` },
+                    { role: "system", content: `You are an editor. Search real news for ${date}. No hallucinations. Output Strictly Valid JSON only. Do not use Markdown code blocks.` },
                     { role: "user", content: `Generate news briefing for ${date}` }
                 ],
-                // Removed strict response_format for compatibility
+                max_tokens: 4096
             };
 
             if (mId.toLowerCase().includes('gemini')) {
@@ -107,7 +111,7 @@ export default async function handler(request, response) {
             const text = completion.choices[0].message.content;
             if (!text) throw new Error("Empty content.");
             
-            return JSON.parse(cleanJsonString(text));
+            return JSON.parse(extractJson(text));
 
          } catch (err) {
              const msg = err.message || "";

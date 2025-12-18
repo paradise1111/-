@@ -25,11 +25,15 @@ export default async function handler(request, response) {
      baseUrl = `${baseUrl}/v1`;
   }
 
-  // JSON Cleaner Helper
-  const cleanJsonString = (str) => {
+  // Helper: Surgically extract JSON
+  const extractJson = (str) => {
     if (!str) return "";
-    let cleaned = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
-    return cleaned.trim();
+    const firstOpen = str.indexOf('{');
+    const lastClose = str.lastIndexOf('}');
+    if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+      return str.substring(firstOpen, lastClose + 1);
+    }
+    return str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
   };
 
   const now = new Date();
@@ -55,7 +59,7 @@ export default async function handler(request, response) {
       Task: Search for ${targetDateStr} news.
       CRITICAL: Use REAL Internet Search. NO HALLUCINATIONS.
       Requirements: Valid source_url required. Bilingual.
-      Output: Strictly Valid JSON ONLY. No Markdown.
+      Output: Strictly Valid JSON ONLY. Do not use Markdown code blocks.
       Structure: ${jsonStructure}
     `;
 
@@ -64,7 +68,7 @@ export default async function handler(request, response) {
     const requestOptions = {
         model: modelId,
         messages: [{ role: "user", content: prompt }],
-        // removed strict response_format
+        max_tokens: 4096
     };
 
     if (modelId.toLowerCase().includes('gemini')) {
@@ -82,7 +86,7 @@ export default async function handler(request, response) {
         throw new Error("Content blocked by safety filter.");
     }
 
-    const contentText = cleanJsonString(choice.message.content);
+    const contentText = extractJson(choice.message.content);
     const content = JSON.parse(contentText);
     
     // HTML Generation
