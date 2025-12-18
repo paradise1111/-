@@ -12,6 +12,13 @@ export default async function handler(request, response) {
     return response.status(200).end();
   }
 
+  // Helper
+  const cleanJsonString = (str) => {
+    if (!str) return "";
+    let cleaned = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
+    return cleaned.trim();
+  };
+
   const getHeader = (key) => {
     const val = request.headers[key];
     if (!val) return undefined;
@@ -82,10 +89,10 @@ export default async function handler(request, response) {
             const requestOptions = {
                 model: mId,
                 messages: [
-                    { role: "system", content: `You are an editor. Search real news for ${date}. No hallucinations. Bilingual JSON output.` },
+                    { role: "system", content: `You are an editor. Search real news for ${date}. No hallucinations. Output Strictly Valid JSON only. No Markdown.` },
                     { role: "user", content: `Generate news briefing for ${date}` }
                 ],
-                response_format: { type: "json_object" }
+                // Removed strict response_format for compatibility
             };
 
             if (mId.toLowerCase().includes('gemini')) {
@@ -98,7 +105,10 @@ export default async function handler(request, response) {
             }
 
             const text = completion.choices[0].message.content;
-            return JSON.parse(text);
+            if (!text) throw new Error("Empty content.");
+            
+            return JSON.parse(cleanJsonString(text));
+
          } catch (err) {
              const msg = err.message || "";
              if (msg.includes("429") || msg.includes("Rate limit")) {

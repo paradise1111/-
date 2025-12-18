@@ -3,7 +3,7 @@ import OpenAI from "openai";
 import { GeneratedContent, UserConfig } from "../types";
 
 export const PRIMARY_MODEL = 'gemini-1.5-pro';
-export const FALLBACK_MODEL = 'gemini-1.5-flash'; // Flash is much faster and has higher limits
+export const FALLBACK_MODEL = 'gemini-1.5-flash'; 
 export const SECONDARY_FALLBACK_MODEL = 'gpt-4o-mini';
 
 const parseUrlConfig = (urlStr?: string) => {
@@ -15,6 +15,14 @@ const parseUrlConfig = (urlStr?: string) => {
        if (!url.endsWith('/v1')) url = `${url}/v1`;
   }
   return { baseUrl: url };
+};
+
+// Helper: Clean JSON string from Markdown code blocks
+const cleanJsonString = (str: string): string => {
+  if (!str) return "";
+  // Remove ```json ... ``` or ``` ... ``` wrappers
+  let cleaned = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
+  return cleaned.trim();
 };
 
 export const connectToOpenAI = async (config: UserConfig): Promise<{ id: string, name?: string }[]> => {
@@ -49,9 +57,6 @@ export const checkConnectivity = async (config?: UserConfig): Promise<boolean> =
     }
 };
 
-/**
- * 带指数退避的生成函数
- */
 export const generateBriefing = async (targetDate: string, config?: UserConfig): Promise<GeneratedContent> => {
     const apiKey = config?.apiKey || '';
     const { baseUrl } = parseUrlConfig(config?.baseUrl);
@@ -59,7 +64,14 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
 
     const client = new OpenAI({ apiKey, baseURL: baseUrl, dangerouslyAllowBrowser: true });
 
-    const systemPrompt = `You are a professional editor. Search real news for ${targetDate}. No hallucinations. Output strictly valid JSON.`;
+    // Enhanced System Prompt to enforce JSON without relying on response_format parameter
+    const systemPrompt = `You are a professional news editor. 
+    Task: Search for REAL news from ${targetDate}. 
+    Rules:
+    1. NO Hallucinations. Verify links.
+    2. Output strictly Valid JSON only. No Markdown formatting, no commentary.
+    3. Content must be bilingual (Chinese/English).`;
+
     const jsonStructure = `{ "viral_titles": [], "medical_viral_titles": [], "general_news": [], "medical_news": [], "date": "${targetDate}" }`;
 
     const attempt = async (mId: string, retryCount: number = 0): Promise<GeneratedContent> => {
@@ -70,10 +82,12 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                 model: mId,
                 messages: [
                     { role: "system", content: systemPrompt },
-                    { role: "user", content: `Retrieve REAL news for ${targetDate}. Format: ${jsonStructure}` }
+                    { role: "user", content: `Retrieve REAL news for ${targetDate}. Required JSON Format: ${jsonStructure}` }
                 ],
-                response_format: { type: "json_object" },
-                max_tokens: 2500
+                // REMOVED: response_format: { type: "json_object" } 
+                // Reason: Many Gemini proxies fail with this flag. We use prompt engineering + cleaning instead.
+                temperature: 0.7,
+                max_tokens: 3500
             };
 
             // Inject tools if it's a Gemini model
@@ -89,10 +103,37 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             }
 
             const completion = await client.chat.completions.create(options);
-            const content = completion.choices[0]?.message?.content;
-            if (!content) throw new Error("API returned an empty body.");
+            const choice = completion.choices[0];
             
-            return JSON.parse(content);
+            // Safety/Refusal Check
+            if (choice.finish_reason === 'content_filter' || choice.finish_reason === 'safety') {
+                throw new Error("Content generation blocked by safety filters (News/Medical topic sensitivity).");
+            }
+
+            let content = choice.message?.content;
+            
+            if (!content) {
+                // If content is empty but refusal exists (OpenAI standard)
+                if (choice.message?.refusal) {
+                    throw new Error(`Model Refusal: ${choice.message.refusal}`);
+                }
+                throw new Error(`API returned an empty body. Finish Reason: ${choice.finish_reason}`);
+            }
+
+            // Clean Markdown wrappers
+            content = cleanJsonString(content);
+            
+            try {
+                const parsed = JSON.parse(content);
+                // Basic validation
+                if (!parsed.general_news && !parsed.viral_titles) {
+                    throw new Error("JSON parsed but missing key fields.");
+                }
+                return parsed;
+            } catch (jsonErr) {
+                console.error("JSON Parse Error. Raw content:", content);
+                throw new Error("Failed to parse model output as JSON.");
+            }
 
         } catch (e: any) {
             const status = e.status || (e.message?.match(/\d{3}/)?.[0]);
@@ -107,12 +148,11 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                     return attempt(mId, retryCount + 1);
                 }
                 
-                // If 429 persists, try switching to a different model if we are not already on one
                 if (mId === PRIMARY_MODEL) return attempt(FALLBACK_MODEL, 0);
                 if (mId === FALLBACK_MODEL) return attempt(SECONDARY_FALLBACK_MODEL, 0);
             }
 
-            // 404/Authentication/Other errors -> direct fallback
+            // Fallback for logic errors (Empty body, JSON parse fail)
             if (retryCount === 0) {
                 if (mId === PRIMARY_MODEL) return attempt(FALLBACK_MODEL, 1);
             }

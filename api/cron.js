@@ -17,17 +17,21 @@ export default async function handler(request, response) {
   const recipients = recipientsEnv ? recipientsEnv.split(',').map(e => e.trim()).filter(e => e) : [];
 
   if (!apiKey || !resendApiKey || recipients.length === 0) {
-    console.error("Missing configuration");
-    return response.status(500).json({ error: "Configuration missing (API Keys or Recipient List)" });
+    return response.status(500).json({ error: "Configuration missing" });
   }
 
-  // Normalize Base URL
   baseUrl = baseUrl.replace(/\/$/, '');
   if (!baseUrl.endsWith('/v1') && !baseUrl.includes('openai.azure.com')) {
      baseUrl = `${baseUrl}/v1`;
   }
 
-  // Calculate Date
+  // JSON Cleaner Helper
+  const cleanJsonString = (str) => {
+    if (!str) return "";
+    let cleaned = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
+    return cleaned.trim();
+  };
+
   const now = new Date();
   const beijingTime = new Date(now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60 * 1000);
   const yesterday = new Date(beijingTime);
@@ -35,10 +39,7 @@ export default async function handler(request, response) {
   const targetDateStr = yesterday.toISOString().split('T')[0];
 
   try {
-    const client = new OpenAI({
-        apiKey,
-        baseURL: baseUrl
-    });
+    const client = new OpenAI({ apiKey, baseURL: baseUrl });
 
     const jsonStructure = `
       {
@@ -53,45 +54,37 @@ export default async function handler(request, response) {
     const prompt = `
       Task: Search for ${targetDateStr} news.
       CRITICAL: Use REAL Internet Search. NO HALLUCINATIONS.
-      
-      Requirements:
-      - Valid source_url required.
-      - Bilingual.
-      
+      Requirements: Valid source_url required. Bilingual.
+      Output: Strictly Valid JSON ONLY. No Markdown.
       Structure: ${jsonStructure}
     `;
 
-    console.log(`Generating content for ${targetDateStr} using ${modelId} via ${baseUrl}...`);
+    console.log(`Generating content for ${targetDateStr} using ${modelId}...`);
 
     const requestOptions = {
         model: modelId,
         messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" }
+        // removed strict response_format
     };
 
     if (modelId.toLowerCase().includes('gemini')) {
-        requestOptions.tools = [
-            {
-                type: "function",
-                function: {
-                    name: "google_search_retrieval",
-                    description: "Google Search",
-                    parameters: { type: "object", properties: {} }
-                }
-            }
-        ];
+        requestOptions.tools = [{ type: "function", function: { name: "google_search_retrieval", description: "Google Search", parameters: { type: "object", properties: {} } } }];
     }
 
     const completion = await client.chat.completions.create(requestOptions);
 
     if (!completion || !completion.choices || completion.choices.length === 0) {
-        throw new Error(`Invalid response structure from model: choices missing. Response: ${JSON.stringify(completion)}`);
+        throw new Error(`Invalid response structure.`);
     }
 
-    const contentText = completion.choices[0].message.content;
-    const content = JSON.parse(contentText);
-    console.log("Content generated successfully.");
+    const choice = completion.choices[0];
+    if (choice.finish_reason === 'content_filter' || choice.finish_reason === 'safety') {
+        throw new Error("Content blocked by safety filter.");
+    }
 
+    const contentText = cleanJsonString(choice.message.content);
+    const content = JSON.parse(contentText);
+    
     // HTML Generation
     const generateHtml = (data) => {
       const listItems = (items, color) => items.map(item => `
@@ -122,7 +115,6 @@ export default async function handler(request, response) {
     const htmlContent = generateHtml(content);
 
     // Send Email
-    console.log(`Sending email to ${recipients.length} recipients...`);
     const emailRes = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -137,12 +129,8 @@ export default async function handler(request, response) {
       }),
     });
 
-    if (!emailRes.ok) {
-        const errText = await emailRes.text();
-        throw new Error(`Resend Error: ${errText}`);
-    }
+    if (!emailRes.ok) throw new Error(await emailRes.text());
     
-    console.log("Cron Job Completed.");
     return response.status(200).json({ success: true, date: targetDateStr });
 
   } catch (error) {
