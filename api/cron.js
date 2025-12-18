@@ -25,15 +25,20 @@ export default async function handler(request, response) {
      baseUrl = `${baseUrl}/v1`;
   }
 
-  // Helper: Surgically extract JSON
-  const extractJson = (str) => {
+  // Helper: Extract and Repair JSON
+  const extractAndRepairJson = (str) => {
     if (!str) return "";
     const firstOpen = str.indexOf('{');
     const lastClose = str.lastIndexOf('}');
+    let jsonCandidate = str;
     if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-      return str.substring(firstOpen, lastClose + 1);
+      jsonCandidate = str.substring(firstOpen, lastClose + 1);
+    } else {
+      jsonCandidate = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
     }
-    return str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
+    // Fix trailing commas
+    jsonCandidate = jsonCandidate.replace(/,(\s*[}\]])/g, '$1');
+    return jsonCandidate;
   };
 
   const now = new Date();
@@ -71,9 +76,7 @@ export default async function handler(request, response) {
         max_tokens: 4096
     };
 
-    if (modelId.toLowerCase().includes('gemini')) {
-        requestOptions.tools = [{ type: "function", function: { name: "google_search_retrieval", description: "Google Search", parameters: { type: "object", properties: {} } } }];
-    }
+    // REMOVED: tools injection
 
     const completion = await client.chat.completions.create(requestOptions);
 
@@ -86,7 +89,7 @@ export default async function handler(request, response) {
         throw new Error("Content blocked by safety filter.");
     }
 
-    const contentText = extractJson(choice.message.content);
+    const contentText = extractAndRepairJson(choice.message.content);
     const content = JSON.parse(contentText);
     
     // HTML Generation

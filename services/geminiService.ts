@@ -17,21 +17,28 @@ const parseUrlConfig = (urlStr?: string) => {
   return { baseUrl: url };
 };
 
-// Helper: Surgically extract JSON object from text
-// This is more robust than cleaning Markdown because it ignores conversational filler before/after the JSON.
-const extractJson = (str: string): string => {
+// Helper: Robust JSON Extraction & Repair
+const extractAndRepairJson = (str: string): string => {
   if (!str) return "";
   
+  // 1. Extract content between first { and last }
   const firstOpen = str.indexOf('{');
   const lastClose = str.lastIndexOf('}');
   
-  // If we found a pair of braces, extract everything in between
+  let jsonCandidate = str;
   if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-    return str.substring(firstOpen, lastClose + 1);
+    jsonCandidate = str.substring(firstOpen, lastClose + 1);
+  } else {
+    // Fallback cleanup if braces aren't clear
+    jsonCandidate = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
   }
-  
-  // Fallback: If no braces found, try cleaning markdown just in case (though unlikely to work if braces are missing)
-  return str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
+
+  // 2. Fix Trailing Commas (The #1 cause of Gemini JSON errors)
+  // Replaces ",}" with "}" and ",]" with "]"
+  // This regex looks for a comma, followed by optional whitespace, followed by a closing brace/bracket
+  jsonCandidate = jsonCandidate.replace(/,(\s*[}\]])/g, '$1');
+
+  return jsonCandidate;
 };
 
 export const connectToOpenAI = async (config: UserConfig): Promise<{ id: string, name?: string }[]> => {
@@ -79,7 +86,7 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
     Rules:
     1. NO Hallucinations. Verify links.
     2. Output strictly Valid JSON only. 
-    3. DO NOT use Markdown code blocks (no \`\`\`json). Just return the raw JSON string.
+    3. DO NOT use Markdown code blocks.
     4. Content must be bilingual (Chinese/English).`;
 
     const jsonStructure = `{ "viral_titles": [], "medical_viral_titles": [], "general_news": [], "medical_news": [], "date": "${targetDate}" }`;
@@ -95,27 +102,20 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                     { role: "user", content: `Retrieve REAL news for ${targetDate}. JSON format required: ${jsonStructure}` }
                 ],
                 temperature: 0.7,
-                max_tokens: 4096 // Increased limit to prevent JSON truncation
+                max_tokens: 4096
             };
 
-            // Inject tools if it's a Gemini model
-            if (mId.toLowerCase().includes('gemini')) {
-                options.tools = [{
-                    type: "function",
-                    function: {
-                        name: "google_search_retrieval",
-                        description: "Google Search",
-                        parameters: { type: "object", properties: {} }
-                    }
-                }];
-            }
+            // REMOVED: tools injection.
+            // Explicitly injecting tools without handling the 'tool_calls' response type
+            // causes the model to return non-JSON tool requests, breaking the parser.
+            // We rely on the model's internal capability or the proxy's default search behavior.
 
             const completion = await client.chat.completions.create(options);
             const choice = completion.choices[0];
             
             // Safety/Refusal Check
             if (choice.finish_reason === 'content_filter' || choice.finish_reason === 'safety') {
-                throw new Error("Content generation blocked by safety filters (News/Medical topic sensitivity).");
+                throw new Error("Content generation blocked by safety filters.");
             }
 
             let content = choice.message?.content;
@@ -127,8 +127,8 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                 throw new Error(`API returned an empty body. Finish Reason: ${choice.finish_reason}`);
             }
 
-            // Surgically extract JSON
-            const jsonStr = extractJson(content);
+            // Extract and Repair JSON
+            const jsonStr = extractAndRepairJson(content);
             
             try {
                 const parsed = JSON.parse(jsonStr);
@@ -139,11 +139,10 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                 return parsed;
             } catch (jsonErr) {
                 console.error("JSON Parse Error. Extracted content:", jsonStr);
-                // If parsing fails, it might be truncated.
                 if (choice.finish_reason === 'length') {
                     throw new Error("News content too long and JSON was truncated. Please try again.");
                 }
-                throw new Error("Failed to parse model output as JSON.");
+                throw new Error("Failed to parse model output as JSON (Syntax Error).");
             }
 
         } catch (e: any) {
@@ -162,9 +161,8 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                 if (mId === FALLBACK_MODEL) return attempt(SECONDARY_FALLBACK_MODEL, 0);
             }
 
-            // Fallback for logic errors (JSON parse fail, etc)
-            if (retryCount === 0) {
-                if (mId === PRIMARY_MODEL) return attempt(FALLBACK_MODEL, 1);
+            if (retryCount === 0 && mId === PRIMARY_MODEL) {
+                 return attempt(FALLBACK_MODEL, 1);
             }
 
             throw new Error(e.message || "Request failed after multiple attempts.");

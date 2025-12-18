@@ -12,15 +12,20 @@ export default async function handler(request, response) {
     return response.status(200).end();
   }
 
-  // Helper: Surgically extract JSON
-  const extractJson = (str) => {
+  // Helper: Extract and Repair JSON
+  const extractAndRepairJson = (str) => {
     if (!str) return "";
     const firstOpen = str.indexOf('{');
     const lastClose = str.lastIndexOf('}');
+    let jsonCandidate = str;
     if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-      return str.substring(firstOpen, lastClose + 1);
+      jsonCandidate = str.substring(firstOpen, lastClose + 1);
+    } else {
+      jsonCandidate = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
     }
-    return str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
+    // Fix trailing commas
+    jsonCandidate = jsonCandidate.replace(/,(\s*[}\]])/g, '$1');
+    return jsonCandidate;
   };
 
   const getHeader = (key) => {
@@ -59,11 +64,6 @@ export default async function handler(request, response) {
           return response.status(429).json({ error: "Upstream Rate Limit (429). Please wait." });
       }
 
-      const contentType = proxyRes.headers.get("content-type");
-      if (contentType && contentType.includes("text/html")) {
-        return response.status(502).json({ error: "Upstream returned HTML. Check Base URL." });
-      }
-
       if (!proxyRes.ok) {
         const errText = await proxyRes.text();
         return response.status(proxyRes.status).json({ error: `Upstream Error: ${errText}` });
@@ -98,10 +98,8 @@ export default async function handler(request, response) {
                 ],
                 max_tokens: 4096
             };
-
-            if (mId.toLowerCase().includes('gemini')) {
-                requestOptions.tools = [{ type: "function", function: { name: "google_search_retrieval", description: "Google Search", parameters: { type: "object", properties: {} } } }];
-            }
+            
+            // REMOVED: tools injection for stability
 
             const completion = await client.chat.completions.create(requestOptions);
             if (!completion || !completion.choices || completion.choices.length === 0) {
@@ -111,7 +109,7 @@ export default async function handler(request, response) {
             const text = completion.choices[0].message.content;
             if (!text) throw new Error("Empty content.");
             
-            return JSON.parse(extractJson(text));
+            return JSON.parse(extractAndRepairJson(text));
 
          } catch (err) {
              const msg = err.message || "";
