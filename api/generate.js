@@ -1,5 +1,5 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
+import OpenAI from "openai";
 
 export default async function handler(request, response) {
   // CORS
@@ -18,13 +18,6 @@ export default async function handler(request, response) {
     try { return decodeURIComponent(val); } catch (e) { return val; }
   };
 
-  // Critical fix: Remove 'models/' prefix if present.
-  // REMOVED encoding logic.
-  const sanitizeModelName = (name) => {
-      if (!name) return name;
-      return name.replace(/^models\//i, '');
-  };
-
   // 1. Config Parsing
   const customApiKey = getHeader('x-custom-api-key');
   const customBaseUrl = getHeader('x-custom-base-url');
@@ -34,29 +27,18 @@ export default async function handler(request, response) {
   if (!apiKey) return response.status(400).json({ error: "Configuration Error: API_KEY is missing." });
   apiKey = apiKey.trim().replace(/^['"]|['"]$/g, '');
 
-  let baseUrl = 'https://generativelanguage.googleapis.com';
-  let apiVersion = 'v1beta';
-
-  if (customBaseUrl && customBaseUrl.trim() !== '') {
-    let url = customBaseUrl.trim();
-    if (!url.startsWith('http')) url = `https://${url}`;
-    
-    // Auto-detect version from URL
-    if (url.endsWith('/v1')) {
-        apiVersion = 'v1';
-        url = url.substring(0, url.length - 3);
-    } else if (url.endsWith('/v1beta')) {
-        apiVersion = 'v1beta';
-        url = url.substring(0, url.length - 7);
-    }
-    
-    baseUrl = url.replace(/\/$/, '');
+  let baseUrl = customBaseUrl || 'https://api.openai.com/v1';
+  // Normalize Base URL
+  baseUrl = baseUrl.replace(/\/$/, '');
+  if (!baseUrl.endsWith('/v1') && !baseUrl.includes('openai.azure.com')) {
+     baseUrl = `${baseUrl}/v1`;
   }
 
   // --- List Models (Proxy) ---
   if (request.method === 'GET' && request.query.action === 'list_models') {
     try {
-      const targetUrl = `${baseUrl}/v1/models`; 
+      let targetUrl = `${baseUrl}/models`;
+
       console.log(`[Proxy List] Forwarding to: ${targetUrl}`);
 
       const proxyRes = await fetch(targetUrl, {
@@ -66,6 +48,11 @@ export default async function handler(request, response) {
           'Content-Type': 'application/json'
         }
       });
+
+      const contentType = proxyRes.headers.get("content-type");
+      if (contentType && contentType.includes("text/html")) {
+        return response.status(502).json({ error: "Upstream returned HTML. Check Base URL." });
+      }
 
       if (!proxyRes.ok) {
         const errText = await proxyRes.text();
@@ -97,79 +84,84 @@ export default async function handler(request, response) {
       const { date } = request.body;
       if (!date) return response.status(400).json({ error: "Date is required" });
 
-      const ai = new GoogleGenAI({ 
-          apiKey, 
-          baseUrl, 
-          apiVersion,
-          requestOptions: {
-            customHeaders: {
-                'Authorization': `Bearer ${apiKey}`
-            }
-          }
+      const client = new OpenAI({
+          apiKey: apiKey,
+          baseURL: baseUrl,
       });
       
-      const primaryModel = customModel || process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
-      const fallbackModel = 'gemini-1.5-pro';
-      const secondaryFallbackModel = 'gemini-1.5-flash';
+      const primaryModel = customModel || process.env.GEMINI_MODEL_ID || 'gemini-1.5-pro';
+      const fallbackModel = 'gpt-4o-mini';
 
-      const newsItemSchema = {
-        type: Type.OBJECT,
-        properties: {
-          title_cn: { type: Type.STRING },
-          title_en: { type: Type.STRING },
-          summary_cn: { type: Type.STRING },
-          summary_en: { type: Type.STRING },
-          source_url: { type: Type.STRING },
-          source_name: { type: Type.STRING },
-        },
-      };
-
-      const responseSchema = {
-        type: Type.OBJECT,
-        properties: {
-          viral_titles: { type: Type.ARRAY, items: { type: Type.STRING } },
-          medical_viral_titles: { type: Type.ARRAY, items: { type: Type.STRING } },
-          general_news: { type: Type.ARRAY, items: newsItemSchema },
-          medical_news: { type: Type.ARRAY, items: newsItemSchema },
-          date: { type: Type.STRING },
-        },
-      };
-
-      const prompt = `
-        你是一位专业的资深新闻编辑和双语内容创作者。
-        任务：搜索昨日（${date}）的新闻，精选 6 条全球时政新闻和 6 条医学文献突破。
-        要求：使用 Google Search，提供 source_url，双语对应，生成爆款标题。
+      const jsonStructure = `
+      {
+        "viral_titles": ["String (3 global news viral titles)"],
+        "medical_viral_titles": ["String (3 medical/health viral titles)"],
+        "general_news": [
+          {
+            "title_cn": "String",
+            "title_en": "String",
+            "summary_cn": "String",
+            "summary_en": "String",
+            "source_url": "String",
+            "source_name": "String"
+          }
+        ],
+        "medical_news": [
+          {
+            "title_cn": "String",
+            "title_en": "String",
+            "summary_cn": "String",
+            "summary_en": "String",
+            "source_url": "String",
+            "source_name": "String"
+          }
+        ],
+        "date": "YYYY-MM-DD"
+      }
       `;
 
-      const genConfig = {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json",
-        responseSchema: responseSchema,
-      };
+      const systemPrompt = `
+        你是一位专业的资深新闻编辑和双语内容创作者。
+        任务：搜索昨日（${date}）的新闻，精选 6 条全球时政新闻和 6 条医学文献突破。
+        要求：
+        1. 提供真实 source_url。
+        2. 双语对应。
+        3. 小红书风格标题。
+        
+        IMPORTANT: Output valid JSON only. Structure:
+        ${jsonStructure}
+      `;
 
       const attempt = async (mId, retryLevel = 0) => {
-         const cleanId = sanitizeModelName(mId);
-         console.log(`Generating with ${cleanId} @ ${baseUrl}/${apiVersion} (Level ${retryLevel})`);
+         console.log(`Generating with ${mId} @ ${baseUrl} (Level ${retryLevel})`);
          try {
-            const result = await ai.models.generateContent({
-                model: cleanId,
-                contents: prompt,
-                config: genConfig,
+            const completion = await client.chat.completions.create({
+                model: mId,
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: "Start" }
+                ],
+                response_format: { type: "json_object" }
             });
-            return JSON.parse(result.text);
+
+            // SAFETY CHECK
+            if (!completion || !completion.choices || completion.choices.length === 0) {
+                 throw new Error(`Invalid response structure from model: choices missing. Response: ${JSON.stringify(completion)}`);
+            }
+
+            const text = completion.choices[0].message.content;
+            return JSON.parse(text);
          } catch (err) {
              const msg = err.message || JSON.stringify(err);
-             const isNotFound = msg.includes('404') || msg.includes('NOT_FOUND') || (err.error && err.error.code === 404);
+             console.warn(`Error with ${mId}: ${msg}`);
+
+             if (msg.includes("<!doctype html>") || msg.includes("<html")) {
+                 throw new Error("Upstream returned HTML (Dashboard) instead of JSON. Check Base URL.");
+             }
              
-             if (isNotFound) {
-                 if (retryLevel === 0 && mId !== fallbackModel) {
-                     console.warn(`Model ${mId} 404. Falling back to ${fallbackModel}`);
-                     return attempt(fallbackModel, 1);
-                 }
-                 if (retryLevel === 1 && mId !== secondaryFallbackModel) {
-                     console.warn(`Model ${mId} 404. Falling back to ${secondaryFallbackModel}`);
-                     return attempt(secondaryFallbackModel, 2);
-                 }
+             if (retryLevel === 0 && mId !== fallbackModel) {
+                 console.warn(`Falling back to ${fallbackModel}`);
+                 return attempt(fallbackModel, 1);
              }
              throw err;
          }

@@ -1,108 +1,86 @@
 
 // api/cron.js
-// 这是一个由 Vercel Cron 触发的后端任务
-// 它不依赖前端浏览器，完全在服务器端运行
-
-import { GoogleGenAI, Schema, Type } from "@google/genai";
+import OpenAI from "openai";
 
 export default async function handler(request, response) {
-  // 1. 安全验证: 确保只有 Vercel Cron 能调用此接口
-  // const authHeader = request.headers.get('authorization');
-  // if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-  //   return response.status(401).json({ success: false });
-  // }
-  
   console.log("⏰ Cron Job Started: Generating Daily Briefing...");
 
-  // 2. 准备环境变量
   let apiKey = process.env.API_KEY;
+  let baseUrl = process.env.API_BASE_URL || 'https://api.openai.com/v1'; 
   const resendApiKey = process.env.RESEND_API_KEY;
   const fromEmail = process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>';
-  
-  // 获取配置的模型ID，默认 gemini-3-pro-preview
-  const modelId = process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
-
-  // 从环境变量获取收件人列表 (逗号分隔)
+  const modelId = process.env.GEMINI_MODEL_ID || 'gemini-1.5-pro';
   const recipientsEnv = process.env.RECIPIENT_LIST;
   const recipients = recipientsEnv ? recipientsEnv.split(',').map(e => e.trim()) : [];
 
   if (!apiKey || !resendApiKey || recipients.length === 0) {
-    console.error("Missing configuration (API_KEY, RESEND_API_KEY, or RECIPIENT_LIST)");
+    console.error("Missing configuration");
     return response.status(500).json({ error: "Configuration missing" });
   }
 
-  // 清洗 API Key
-  apiKey = apiKey.trim();
-  if ((apiKey.startsWith('"') && apiKey.endsWith('"')) || (apiKey.startsWith("'") && apiKey.endsWith("'"))) {
-    apiKey = apiKey.slice(1, -1);
+  // Clean API Key
+  apiKey = apiKey.trim().replace(/^['"]|['"]$/g, '');
+
+  // Normalize Base URL
+  baseUrl = baseUrl.replace(/\/$/, '');
+  if (!baseUrl.endsWith('/v1') && !baseUrl.includes('openai.azure.com')) {
+     baseUrl = `${baseUrl}/v1`;
   }
 
-  // 3. 计算日期 (北京时间昨天)
+  // Calculate Date
   const now = new Date();
-  // UTC+8
   const beijingTime = new Date(now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60 * 1000);
   const yesterday = new Date(beijingTime);
   yesterday.setDate(yesterday.getDate() - 1);
   const targetDateStr = yesterday.toISOString().split('T')[0];
-  const todayDateStr = beijingTime.toISOString().split('T')[0];
 
   try {
-    // 4. 调用 Gemini 生成内容
-    const ai = new GoogleGenAI({ apiKey });
-    
-    const newsItemSchema = {
-      type: Type.OBJECT,
-      properties: {
-        title_cn: { type: Type.STRING },
-        title_en: { type: Type.STRING },
-        summary_cn: { type: Type.STRING },
-        summary_en: { type: Type.STRING },
-        source_url: { type: Type.STRING },
-        source_name: { type: Type.STRING },
-      },
-    };
+    const client = new OpenAI({
+        apiKey,
+        baseURL: baseUrl
+    });
 
-    const responseSchema = {
-      type: Type.OBJECT,
-      properties: {
-        viral_titles: { type: Type.ARRAY, items: { type: Type.STRING } },
-        medical_viral_titles: { type: Type.ARRAY, items: { type: Type.STRING } },
-        general_news: { type: Type.ARRAY, items: newsItemSchema },
-        medical_news: { type: Type.ARRAY, items: newsItemSchema },
-        date: { type: Type.STRING },
-      },
-    };
+    const jsonStructure = `
+      {
+        "viral_titles": ["String"],
+        "medical_viral_titles": ["String"],
+        "general_news": [{ "title_cn": "String", "title_en": "String", "summary_cn": "String", "summary_en": "String", "source_url": "String", "source_name": "String" }],
+        "medical_news": [{ "title_cn": "String", "title_en": "String", "summary_cn": "String", "summary_en": "String", "source_url": "String", "source_name": "String" }],
+        "date": "YYYY-MM-DD"
+      }
+    `;
 
     const prompt = `
       任务：搜索 ${targetDateStr} 的新闻。
       1. 精选 6 条全球/政治/经济新闻。
       2. 精选 6 条医学/健康/科学文献突破。
       要求：
-      - 必须使用 Google Search 工具。
-      - 必须提供真实、可访问的 source_url。
-      - 为医学板块生成 3 个小红书风格爆款标题 (medical_viral_titles)。
-      - 为时政板块生成 3 个小红书风格爆款标题 (viral_titles)。
+      - 提供真实 source_url。
+      - 小红书风格标题。
       - 中英双语对照。
+      
+      IMPORTANT: Return VALID JSON only. No Markdown.
+      Structure: ${jsonStructure}
     `;
 
-    console.log(`Generating content for date: ${targetDateStr} using model: ${modelId}...`);
-    
-    const config = {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json",
-        responseSchema: responseSchema,
-    };
+    console.log(`Generating content for ${targetDateStr} using ${modelId} via ${baseUrl}...`);
 
-    const genResponse = await ai.models.generateContent({
-      model: modelId,
-      contents: prompt,
-      config: config,
+    const completion = await client.chat.completions.create({
+        model: modelId,
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" }
     });
 
-    const content = JSON.parse(genResponse.text);
+    // SAFETY CHECK
+    if (!completion || !completion.choices || completion.choices.length === 0) {
+        throw new Error(`Invalid response structure from model: choices missing. Response: ${JSON.stringify(completion)}`);
+    }
+
+    const contentText = completion.choices[0].message.content;
+    const content = JSON.parse(contentText);
     console.log("Content generated successfully.");
 
-    // 5. 生成 HTML
+    // HTML Generation
     const generateHtml = (data) => {
       const listItems = (items, color) => items.map(item => `
         <div style="margin-bottom: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 8px;">
@@ -131,8 +109,8 @@ export default async function handler(request, response) {
 
     const htmlContent = generateHtml(content);
 
-    // 6. 发送邮件
-    console.log(`Sending email to ${recipients.length} recipients via Resend...`);
+    // Send Email
+    console.log(`Sending email to ${recipients.length} recipients...`);
     const emailRes = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -142,18 +120,15 @@ export default async function handler(request, response) {
       body: JSON.stringify({
         from: fromEmail,
         to: recipients,
-        subject: `[Aurora] Daily Briefing - ${todayDateStr}`,
+        subject: `[Aurora] Daily Briefing - ${targetDateStr}`,
         html: htmlContent,
       }),
     });
 
-    if (!emailRes.ok) {
-        const errText = await emailRes.text();
-        throw new Error(errText);
-    }
+    if (!emailRes.ok) throw new Error(await emailRes.text());
     
-    console.log("Cron Job Completed Successfully.");
-    return response.status(200).json({ success: true, date: todayDateStr });
+    console.log("Cron Job Completed.");
+    return response.status(200).json({ success: true, date: targetDateStr });
 
   } catch (error) {
     console.error("Cron Job Failed:", error);
