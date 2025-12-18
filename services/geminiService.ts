@@ -4,46 +4,55 @@ import { GeneratedContent, UserConfig } from "../types";
 
 // UI Display Fallback
 export const PRIMARY_MODEL = 'gemini-3-pro-preview';
+export const FALLBACK_MODEL = 'gemini-1.5-pro'; 
+export const SECONDARY_FALLBACK_MODEL = 'gemini-1.5-flash';
 
 // Helper to sanitize model name
+// Critical fix: Remove 'models/' prefix.
+// REMOVED encoding logic to prevent double-encoding on proxies.
 const sanitizeModelName = (name: string) => {
     if (!name) return name;
-    if (/[^a-zA-Z0-9.\-_]/.test(name)) {
-        return encodeURIComponent(name);
-    }
-    return name;
+    // Strip 'models/' prefix if it exists (case insensitive)
+    return name.replace(/^models\//i, '');
 };
 
-// Helper to clean Base URL
-const cleanBaseUrl = (url?: string) => {
-    if (!url) return 'https://generativelanguage.googleapis.com';
-    let clean = url.trim();
-    if (!clean.startsWith('http')) clean = `https://${clean}`;
-    // Remove all suffixes to get the root
-    clean = clean.replace(/\/$/, '');
-    clean = clean.replace(/\/v1beta\/?$/, '');
-    clean = clean.replace(/\/v1\/?$/, '');
-    return clean;
+// Advanced URL Parser to handle v1 vs v1beta logic
+const parseUrlConfig = (urlStr?: string) => {
+  if (!urlStr) return { baseUrl: 'https://generativelanguage.googleapis.com', version: 'v1beta' };
+  let url = urlStr.trim();
+  if (!url.startsWith('http')) url = `https://${url}`;
+  
+  // Remove trailing slash for consistency
+  url = url.replace(/\/$/, '');
+
+  let version = 'v1beta';
+  
+  // Detect explicit version in user input
+  if (url.endsWith('/v1')) {
+      version = 'v1';
+      url = url.substring(0, url.length - 3); // Remove /v1
+  } else if (url.endsWith('/v1beta')) {
+      version = 'v1beta';
+      url = url.substring(0, url.length - 7); // Remove /v1beta
+  }
+  
+  return { baseUrl: url, version };
 };
 
 // --- Tavern-Style Connection Logic ---
 
-/**
- * 像酒馆一样，直接请求 OpenAI 标准的 /v1/models 接口
- */
 export const connectToOpenAI = async (config: UserConfig): Promise<{ id: string, name?: string }[]> => {
     const apiKey = config.apiKey?.trim();
-    const baseUrl = cleanBaseUrl(config.baseUrl);
+    const { baseUrl } = parseUrlConfig(config.baseUrl);
     
     if (!apiKey) throw new Error("缺少 API Key");
 
-    // 构造标准的 OpenAI 模型列表 URL
+    // OpenAI standard listing endpoint
     const targetUrl = `${baseUrl}/v1/models`;
 
     try {
         console.log(`[Connection] Direct fetch: ${targetUrl}`);
         
-        // 1. 尝试直连 (Direct Fetch)
         const response = await fetch(targetUrl, {
             method: 'GET',
             headers: {
@@ -52,40 +61,25 @@ export const connectToOpenAI = async (config: UserConfig): Promise<{ id: string,
             }
         });
 
-        // 处理非 200 响应
         if (!response.ok) {
-            // 如果是 404，可能是路径不对，或者该中转站不支持列表
-            // 如果是 401，是 Key 错误
-            // 如果是 502/500，是服务器错误
             const errText = await response.text();
             throw new Error(`HTTP ${response.status}: ${errText.substring(0, 100)}`);
         }
 
         const data = await response.json();
         
-        // 解析 OpenAI 标准格式: { data: [{ id: "..." }, ...] }
         let models: any[] = [];
-        if (Array.isArray(data.data)) {
-            models = data.data;
-        } else if (Array.isArray(data.models)) {
-            // 兼容部分非标接口
-            models = data.models;
-        } else if (Array.isArray(data)) {
-            // 兼容直接返回数组
-            models = data;
-        }
+        if (Array.isArray(data.data)) models = data.data;
+        else if (Array.isArray(data.models)) models = data.models;
+        else if (Array.isArray(data)) models = data;
 
-        if (models.length === 0) {
-            throw new Error("连接成功，但返回的模型列表为空");
-        }
+        if (models.length === 0) throw new Error("连接成功，但返回的模型列表为空");
 
-        // 映射并排序
         return models
             .map((m: any) => ({ id: m.id, name: m.id }))
             .sort((a, b) => a.id.localeCompare(b.id));
 
     } catch (error: any) {
-        // 2. 如果直连失败（通常是 CORS 跨域问题），尝试通过后端代理转发
         if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
             console.warn(`[Connection] Direct fetch failed (CORS?), trying proxy...`);
             return connectViaProxy(baseUrl, apiKey);
@@ -94,9 +88,6 @@ export const connectToOpenAI = async (config: UserConfig): Promise<{ id: string,
     }
 };
 
-/**
- * 通过本地域 API 代理转发请求 (解决 CORS 问题)
- */
 const connectViaProxy = async (baseUrl: string, apiKey: string) => {
     try {
         const proxyUrl = `/api/generate?action=list_models`;
@@ -122,7 +113,6 @@ const connectViaProxy = async (baseUrl: string, apiKey: string) => {
 // --- Generation ---
 
 export const checkConnectivity = async (config?: UserConfig): Promise<boolean> => {
-    // 简化版 Check: 只要能列出模型，就认为连接成功
     try {
         if (!config?.apiKey) return false;
         await connectToOpenAI(config);
@@ -137,19 +127,21 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
     const apiKey = config?.apiKey || process.env.API_KEY || '';
     if (!apiKey) throw new Error("API Key is required.");
 
-    const baseUrl = cleanBaseUrl(config?.baseUrl);
+    const { baseUrl, version } = parseUrlConfig(config?.baseUrl);
     
-    // SDK 初始化
-    // 注意：即便我们用 OpenAI 格式获取了模型列表，生成时使用的是 Google SDK
-    // 大多数中转站 (OneAPI/NewAPI) 会自动根据路径识别请求类型
+    // Initialize SDK with detected version and force Auth Headers for proxies
     const ai = new GoogleGenAI({ 
         apiKey: apiKey, 
         baseUrl: baseUrl,
-        apiVersion: 'v1beta' // 默认保持 v1beta，兼容性最好
+        apiVersion: version,
+        requestOptions: {
+            customHeaders: {
+                'Authorization': `Bearer ${apiKey}`
+            }
+        }
     } as any);
     
-    const modelId = config?.modelId || PRIMARY_MODEL;
-    const safeModelId = sanitizeModelName(modelId);
+    const userModelId = config?.modelId || PRIMARY_MODEL;
     
     const newsItemSchema = {
         type: Type.OBJECT,
@@ -194,40 +186,41 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
       responseSchema: responseSchema,
     };
 
-    // 如果是 gemini-3/2.5 系列，添加思考配置
-    if (modelId.includes('gemini-3') || modelId.includes('gemini-2.5')) {
-       // genConfig.thinkingConfig = { thinkingBudget: 1024 }; // 可选开启
-    }
-
-    try {
-        console.log(`Generating with ${safeModelId} via ${baseUrl}...`);
+    // Retry Helper
+    const attemptGenerate = async (mId: string, retryLevel = 0): Promise<GeneratedContent> => {
+        // ALWAYS sanitize/clean model ID (strip 'models/' prefix)
+        const cleanId = sanitizeModelName(mId);
         
-        // 直接调用 SDK
-        const result = await ai.models.generateContent({
-          model: safeModelId,
-          contents: prompt,
-          config: genConfig,
-        });
-
-        if (!result.text) throw new Error("Empty response from model");
-        return JSON.parse(result.text);
-
-    } catch (e: any) {
-         // 错误处理: 如果 404，尝试使用原始 ID 重试
-         const isNotFound = (err: any) => {
-            const msg = err.message || JSON.stringify(err);
-            return msg.includes('404') || msg.includes('NOT_FOUND');
-         };
-
-        if (isNotFound(e) && safeModelId !== modelId) {
-           console.warn("Sanitized ID failed (404), retrying with raw ID...");
-           const resultRetry = await ai.models.generateContent({
-                model: modelId,
-                contents: prompt,
-                config: genConfig,
+        try {
+            console.log(`Generating with ${cleanId} via ${baseUrl}/${version}...`);
+            const result = await ai.models.generateContent({
+              model: cleanId,
+              contents: prompt,
+              config: genConfig,
             });
-            return JSON.parse(resultRetry.text);
+            if (!result.text) throw new Error("Empty response from model");
+            return JSON.parse(result.text);
+        } catch (e: any) {
+            const msg = e.message || JSON.stringify(e);
+            console.warn(`Attempt failed for ${cleanId}:`, msg);
+
+            const isNotFound = msg.includes('404') || msg.includes('NOT_FOUND') || (e.error && e.error.code === 404);
+            
+            // Logic for fallbacks
+            if (isNotFound) {
+                if (retryLevel === 0 && mId !== FALLBACK_MODEL) {
+                     console.warn(`Model ${mId} 404. Trying fallback 1: ${FALLBACK_MODEL}`);
+                     return attemptGenerate(FALLBACK_MODEL, 1);
+                }
+                if (retryLevel === 1 && mId !== SECONDARY_FALLBACK_MODEL) {
+                     console.warn(`Model ${mId} 404. Trying fallback 2: ${SECONDARY_FALLBACK_MODEL}`);
+                     return attemptGenerate(SECONDARY_FALLBACK_MODEL, 2);
+                }
+            }
+            
+            throw e;
         }
-        throw e;
-    }
+    };
+
+    return await attemptGenerate(userModelId);
 };

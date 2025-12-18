@@ -2,53 +2,61 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
 export default async function handler(request, response) {
-  // 设置 CORS 头部
+  // CORS
   response.setHeader('Access-Control-Allow-Credentials', true);
   response.setHeader('Access-Control-Allow-Origin', '*');
   response.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
   response.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, x-custom-api-key, x-custom-base-url, x-custom-model');
 
   if (request.method === 'OPTIONS') {
-    response.status(200).end();
-    return;
+    return response.status(200).end();
   }
 
-  // Helper: Decode Headers
   const getHeader = (key) => {
     const val = request.headers[key];
     if (!val) return undefined;
     try { return decodeURIComponent(val); } catch (e) { return val; }
   };
 
+  // Critical fix: Remove 'models/' prefix if present.
+  // REMOVED encoding logic.
   const sanitizeModelName = (name) => {
       if (!name) return name;
-      if (/[^a-zA-Z0-9.\-_]/.test(name)) return encodeURIComponent(name);
-      return name;
+      return name.replace(/^models\//i, '');
   };
 
+  // 1. Config Parsing
   const customApiKey = getHeader('x-custom-api-key');
   const customBaseUrl = getHeader('x-custom-base-url');
   const customModel = getHeader('x-custom-model');
 
   let apiKey = customApiKey || process.env.API_KEY;
   if (!apiKey) return response.status(400).json({ error: "Configuration Error: API_KEY is missing." });
-  
   apiKey = apiKey.trim().replace(/^['"]|['"]$/g, '');
 
   let baseUrl = 'https://generativelanguage.googleapis.com';
+  let apiVersion = 'v1beta';
+
   if (customBaseUrl && customBaseUrl.trim() !== '') {
     let url = customBaseUrl.trim();
     if (!url.startsWith('http')) url = `https://${url}`;
-    url = url.replace(/\/$/, '').replace(/\/v1beta\/?$/, '').replace(/\/v1\/?$/, '');
-    baseUrl = url;
+    
+    // Auto-detect version from URL
+    if (url.endsWith('/v1')) {
+        apiVersion = 'v1';
+        url = url.substring(0, url.length - 3);
+    } else if (url.endsWith('/v1beta')) {
+        apiVersion = 'v1beta';
+        url = url.substring(0, url.length - 7);
+    }
+    
+    baseUrl = url.replace(/\/$/, '');
   }
 
-  // --- 模式 1: 代理获取模型列表 (类似 Tavern 的后端代理) ---
+  // --- List Models (Proxy) ---
   if (request.method === 'GET' && request.query.action === 'list_models') {
     try {
-      // 强制使用 OpenAI 标准路径 /v1/models
-      // 这是中转站通用的标准
-      const targetUrl = `${baseUrl}/v1/models`;
+      const targetUrl = `${baseUrl}/v1/models`; 
       console.log(`[Proxy List] Forwarding to: ${targetUrl}`);
 
       const proxyRes = await fetch(targetUrl, {
@@ -65,8 +73,6 @@ export default async function handler(request, response) {
       }
 
       const data = await proxyRes.json();
-      
-      // 确保返回格式统一为 { models: [{id: ...}] }
       let models = [];
       if (data.data) models = data.data;
       else if (data.models) models = data.models;
@@ -80,25 +86,31 @@ export default async function handler(request, response) {
     }
   }
 
-  // --- 模式 2: 连通性检查 (Ping) ---
+  // --- Ping ---
   if (request.method === 'GET' && request.query.check === 'true') {
-    // 这里的 check 主要是给 UI 用的简单 Ping
     return response.status(200).json({ success: true, msg: "Backend Online" });
   }
 
-  // --- 模式 3: 生成简报 (POST) ---
+  // --- Generate ---
   if (request.method === 'POST') {
     try {
       const { date } = request.body;
       if (!date) return response.status(400).json({ error: "Date is required" });
 
-      // 初始化 SDK
-      // Google SDK 默认会追加 /v1beta/models...
-      // 大多数 OneAPI 中转站能兼容 Google SDK 的请求结构
-      const ai = new GoogleGenAI({ apiKey, baseUrl, apiVersion: 'v1beta' });
+      const ai = new GoogleGenAI({ 
+          apiKey, 
+          baseUrl, 
+          apiVersion,
+          requestOptions: {
+            customHeaders: {
+                'Authorization': `Bearer ${apiKey}`
+            }
+          }
+      });
       
-      const modelId = customModel || process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
-      const safeModel = sanitizeModelName(modelId);
+      const primaryModel = customModel || process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
+      const fallbackModel = 'gemini-1.5-pro';
+      const secondaryFallbackModel = 'gemini-1.5-flash';
 
       const newsItemSchema = {
         type: Type.OBJECT,
@@ -135,20 +147,46 @@ export default async function handler(request, response) {
         responseSchema: responseSchema,
       };
 
-      console.log(`Generating via Backend Proxy: ${safeModel} @ ${baseUrl}`);
+      const attempt = async (mId, retryLevel = 0) => {
+         const cleanId = sanitizeModelName(mId);
+         console.log(`Generating with ${cleanId} @ ${baseUrl}/${apiVersion} (Level ${retryLevel})`);
+         try {
+            const result = await ai.models.generateContent({
+                model: cleanId,
+                contents: prompt,
+                config: genConfig,
+            });
+            return JSON.parse(result.text);
+         } catch (err) {
+             const msg = err.message || JSON.stringify(err);
+             const isNotFound = msg.includes('404') || msg.includes('NOT_FOUND') || (err.error && err.error.code === 404);
+             
+             if (isNotFound) {
+                 if (retryLevel === 0 && mId !== fallbackModel) {
+                     console.warn(`Model ${mId} 404. Falling back to ${fallbackModel}`);
+                     return attempt(fallbackModel, 1);
+                 }
+                 if (retryLevel === 1 && mId !== secondaryFallbackModel) {
+                     console.warn(`Model ${mId} 404. Falling back to ${secondaryFallbackModel}`);
+                     return attempt(secondaryFallbackModel, 2);
+                 }
+             }
+             throw err;
+         }
+      };
 
-      const result = await ai.models.generateContent({
-        model: safeModel,
-        contents: prompt,
-        config: genConfig,
-      });
-
-      return response.status(200).json(JSON.parse(result.text));
+      try {
+          const data = await attempt(primaryModel);
+          return response.status(200).json(data);
+      } catch (err) {
+          console.error("All generation attempts failed:", err);
+          const errorMsg = err.response ? JSON.stringify(err.response) : err.message;
+          return response.status(500).json({ error: errorMsg });
+      }
 
     } catch (error) {
-      console.error("Generation Failed:", error);
-      const errorMsg = error.response ? JSON.stringify(error.response) : error.message;
-      return response.status(500).json({ error: errorMsg });
+      console.error("Global Error:", error);
+      return response.status(500).json({ error: error.message });
     }
   }
 
