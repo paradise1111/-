@@ -93,14 +93,16 @@ export default async function handler(request, response) {
             const requestOptions = {
                 model: mId,
                 messages: [
-                    { role: "system", content: `You are an editor. Search real news for ${date}. No hallucinations. Output Strictly Valid JSON only. Do not use Markdown code blocks.` },
+                    { role: "system", content: `You are an editor. Search real news for ${date}. 
+                    Output strictly Valid MINIFIED JSON. 
+                    Escape all double quotes and newlines inside strings. 
+                    No Markdown.` },
                     { role: "user", content: `Generate news briefing for ${date}` }
                 ],
-                max_tokens: 4096
+                max_tokens: 4096,
+                temperature: 0.3 // Stability
             };
             
-            // REMOVED: tools injection for stability
-
             const completion = await client.chat.completions.create(requestOptions);
             if (!completion || !completion.choices || completion.choices.length === 0) {
                  throw new Error("Empty choices in model response.");

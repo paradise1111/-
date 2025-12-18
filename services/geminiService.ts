@@ -33,10 +33,12 @@ const extractAndRepairJson = (str: string): string => {
     jsonCandidate = str.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
   }
 
-  // 2. Fix Trailing Commas (The #1 cause of Gemini JSON errors)
-  // Replaces ",}" with "}" and ",]" with "]"
-  // This regex looks for a comma, followed by optional whitespace, followed by a closing brace/bracket
+  // 2. Fix Trailing Commas
   jsonCandidate = jsonCandidate.replace(/,(\s*[}\]])/g, '$1');
+
+  // 3. Attempt to fix unescaped newlines within strings (Risky but necessary for Gemini)
+  // This is a simple heuristic: if we see a newline that is NOT followed by a whitespace and a key, it might be in a string.
+  // Ideally, we rely on the Prompt to fix this.
 
   return jsonCandidate;
 };
@@ -80,14 +82,18 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
 
     const client = new OpenAI({ apiKey, baseURL: baseUrl, dangerouslyAllowBrowser: true });
 
-    // Enhanced System Prompt
+    // Enhanced System Prompt for Stability
     const systemPrompt = `You are a professional news editor. 
     Task: Search for REAL news from ${targetDate}. 
-    Rules:
-    1. NO Hallucinations. Verify links.
-    2. Output strictly Valid JSON only. 
-    3. DO NOT use Markdown code blocks.
-    4. Content must be bilingual (Chinese/English).`;
+    
+    CRITICAL OUTPUT RULES:
+    1. Output strictly Valid MINIFIED JSON only.
+    2. NO Markdown formatting, NO code blocks, NO text before/after.
+    3. ESCAPE RULES:
+       - Escape all double quotes inside strings (e.g., \\")
+       - Escape all newlines inside strings (e.g., \\n) - DO NOT use actual line breaks in values.
+    4. Content must be bilingual (Chinese/English).
+    5. Keep summaries concise (under 50 words) to avoid truncation.`;
 
     const jsonStructure = `{ "viral_titles": [], "medical_viral_titles": [], "general_news": [], "medical_news": [], "date": "${targetDate}" }`;
 
@@ -99,21 +105,16 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
                 model: mId,
                 messages: [
                     { role: "system", content: systemPrompt },
-                    { role: "user", content: `Retrieve REAL news for ${targetDate}. JSON format required: ${jsonStructure}` }
+                    { role: "user", content: `Retrieve REAL news for ${targetDate}. Return raw minified JSON matching: ${jsonStructure}` }
                 ],
-                temperature: 0.7,
+                // Lower temperature for deterministic formatting
+                temperature: 0.3,
                 max_tokens: 4096
             };
-
-            // REMOVED: tools injection.
-            // Explicitly injecting tools without handling the 'tool_calls' response type
-            // causes the model to return non-JSON tool requests, breaking the parser.
-            // We rely on the model's internal capability or the proxy's default search behavior.
 
             const completion = await client.chat.completions.create(options);
             const choice = completion.choices[0];
             
-            // Safety/Refusal Check
             if (choice.finish_reason === 'content_filter' || choice.finish_reason === 'safety') {
                 throw new Error("Content generation blocked by safety filters.");
             }
@@ -121,9 +122,7 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             let content = choice.message?.content;
             
             if (!content) {
-                if (choice.message?.refusal) {
-                    throw new Error(`Model Refusal: ${choice.message.refusal}`);
-                }
+                if (choice.message?.refusal) throw new Error(`Model Refusal: ${choice.message.refusal}`);
                 throw new Error(`API returned an empty body. Finish Reason: ${choice.finish_reason}`);
             }
 
@@ -132,15 +131,16 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             
             try {
                 const parsed = JSON.parse(jsonStr);
-                // Basic validation
                 if (!parsed.general_news && !parsed.viral_titles) {
                     throw new Error("JSON parsed but missing key fields.");
                 }
                 return parsed;
             } catch (jsonErr) {
-                console.error("JSON Parse Error. Extracted content:", jsonStr);
+                // Log the first 100 chars to help identify if it's garbage
+                console.error("JSON Parse Error. Start of content:", jsonStr.substring(0, 100));
+                
                 if (choice.finish_reason === 'length') {
-                    throw new Error("News content too long and JSON was truncated. Please try again.");
+                    throw new Error("News content too long and JSON was truncated. Trying fallback model...");
                 }
                 throw new Error("Failed to parse model output as JSON (Syntax Error).");
             }
@@ -149,20 +149,23 @@ export const generateBriefing = async (targetDate: string, config?: UserConfig):
             const status = e.status || (e.message?.match(/\d{3}/)?.[0]);
             console.warn(`Error with ${mId}:`, e.message);
 
-            // 429 Handling
+            // Rate Limit
             if (status == 429 || e.message.includes("429")) {
                 if (retryCount < 3) {
                     const waitTime = Math.pow(2, retryCount + 1) * 1000;
-                    console.log(`Rate limited. Waiting ${waitTime}ms before retry...`);
+                    console.log(`Rate limited. Waiting ${waitTime}ms...`);
                     await new Promise(r => setTimeout(r, waitTime));
                     return attempt(mId, retryCount + 1);
                 }
                 if (mId === PRIMARY_MODEL) return attempt(FALLBACK_MODEL, 0);
-                if (mId === FALLBACK_MODEL) return attempt(SECONDARY_FALLBACK_MODEL, 0);
             }
 
+            // Logic/Parse Errors: switch model immediately
             if (retryCount === 0 && mId === PRIMARY_MODEL) {
                  return attempt(FALLBACK_MODEL, 1);
+            }
+            if (retryCount === 0 && mId === FALLBACK_MODEL) {
+                 return attempt(SECONDARY_FALLBACK_MODEL, 1);
             }
 
             throw new Error(e.message || "Request failed after multiple attempts.");

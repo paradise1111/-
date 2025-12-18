@@ -64,7 +64,8 @@ export default async function handler(request, response) {
       Task: Search for ${targetDateStr} news.
       CRITICAL: Use REAL Internet Search. NO HALLUCINATIONS.
       Requirements: Valid source_url required. Bilingual.
-      Output: Strictly Valid JSON ONLY. Do not use Markdown code blocks.
+      Output: Strictly Valid MINIFIED JSON ONLY. No Markdown code blocks.
+      Format: Escape all newlines in strings as \\n.
       Structure: ${jsonStructure}
     `;
 
@@ -73,10 +74,9 @@ export default async function handler(request, response) {
     const requestOptions = {
         model: modelId,
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 4096
+        max_tokens: 4096,
+        temperature: 0.3
     };
-
-    // REMOVED: tools injection
 
     const completion = await client.chat.completions.create(requestOptions);
 
