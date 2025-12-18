@@ -1,0 +1,5 @@
+{
+  "name": "Aurora News Insight",
+  "description": "A Cyber-Apple style daily news briefing generator using Gemini Search Grounding. Features verified retrieval, bilingual content generation, and automated scheduling interfaces.",
+  "requestFramePermissions": []
+}
