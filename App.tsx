@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Activity, Globe, HeartPulse, RefreshCw, Server, ShieldCheck, Sparkles, Mail, Clock, Send, Stethoscope, AlertTriangle, Settings } from 'lucide-react';
+import { Activity, Globe, HeartPulse, RefreshCw, Server, ShieldCheck, Sparkles, Mail, Send, Stethoscope, Settings, Timer } from 'lucide-react';
 import { GlassCard } from './components/GlassCard';
 import { StatusBadge } from './components/StatusBadge';
 import { TypewriterText } from './components/TypewriterText';
@@ -9,13 +9,7 @@ import { checkConnectivity, generateBriefing, PRIMARY_MODEL } from './services/g
 import { sendEmail } from './services/emailService';
 import { AppStatus, GeneratedContent, NewsItem, UserConfig } from './types';
 
-interface NewsCardProps {
-  item: NewsItem;
-  idx: number;
-  color: 'blue' | 'emerald';
-}
-
-const NewsCard: React.FC<NewsCardProps> = ({ item, idx, color }) => (
+const NewsCard: React.FC<{ item: NewsItem; idx: number; color: 'blue' | 'emerald' }> = ({ item, idx, color }) => (
   <GlassCard className="h-full flex flex-col" delay={idx * 100}>
     <div className="flex justify-between items-start mb-3">
       <span className={`text-xs font-mono px-2 py-1 rounded border ${color === 'blue' ? 'border-blue-500/30 text-blue-300' : 'border-emerald-500/30 text-emerald-300'}`}>
@@ -36,435 +30,207 @@ export default function App() {
   const [data, setData] = useState<GeneratedContent | null>(null);
   const [progressLog, setProgressLog] = useState<string[]>([]);
   const [emails, setEmails] = useState<string[]>(['', '', '']);
-  const [lastAutoRunDate, setLastAutoRunDate] = useState<string>("");
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [userConfig, setUserConfig] = useState<UserConfig>({});
+  const [cooldown, setCooldown] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Time Logic
   const today = new Date();
-  const beijingOffset = 8 * 60; 
-  const localOffset = today.getTimezoneOffset();
-  const beijingTime = new Date(today.getTime() + (beijingOffset + localOffset) * 60 * 1000);
-  
-  // Target Yesterday (Beijing time)
+  const beijingTime = new Date(today.getTime() + (8 * 60 + today.getTimezoneOffset()) * 60 * 1000);
   const yesterday = new Date(beijingTime);
   yesterday.setDate(yesterday.getDate() - 1);
   const targetDateStr = yesterday.toISOString().split('T')[0];
-  const displayTime = beijingTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
-  // Load config from localStorage
   useEffect(() => {
-    const savedConfig = localStorage.getItem('aurora_config');
-    if (savedConfig) {
+    const saved = localStorage.getItem('aurora_config');
+    if (saved) {
       try {
-        const parsed = JSON.parse(savedConfig);
+        const parsed = JSON.parse(saved);
         setUserConfig(parsed);
-        // Only init connection after loading config
         initConnection(parsed);
-      } catch (e) {
-        console.error("Failed to parse saved config", e);
+      } catch {
         initConnection({});
       }
     } else {
         initConnection({});
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleSaveConfig = (newConfig: UserConfig) => {
-    setUserConfig(newConfig);
-    localStorage.setItem('aurora_config', JSON.stringify(newConfig));
-    addLog("配置已更新。正在重新建立连接...");
-    initConnection(newConfig);
-  };
+  // Cooldown Timer
+  useEffect(() => {
+    if (cooldown > 0) {
+      const timer = setInterval(() => setCooldown(c => c - 1), 1000);
+      return () => clearInterval(timer);
+    }
+  }, [cooldown]);
 
   const initConnection = async (config: UserConfig) => {
     setStatus(AppStatus.CONNECTING);
-    const modelName = config.modelId || PRIMARY_MODEL;
-    addLog(`正在初始化连接...`);
-    
-    if (config.baseUrl) {
-        addLog(`🌐 使用自定义网关: ${config.baseUrl}`);
-    } else {
-        addLog(`🌐 使用 Google 官方 API (未配置 Base URL)`);
-    }
-
-    if (config.apiKey) {
-        addLog(`🔑 使用自定义 API Key: ${config.apiKey.substring(0, 8)}...`);
-    } else {
-        addLog(`🔑 使用服务器预设 API Key`);
-    }
-    
+    addLog(`🌐 正在检测节点连接性...`);
     const isConnected = await checkConnectivity(config);
     if (isConnected) {
       setStatus(AppStatus.IDLE);
-      addLog(`✅ 握手成功。模型 ${modelName} 在线。`);
+      addLog(`✅ 节点就绪。`);
     } else {
       setStatus(AppStatus.ERROR);
-      addLog(`❌ 连接失败。无法访问模型 ${modelName}。`);
-      if (config.apiKey && !config.baseUrl) {
-          addLog(`⚠️ 警告: 检测到您使用了自定义 Key 但未配 Base URL。`);
-          addLog(`>>> 正在打开设置面板...`);
-          setTimeout(() => setIsSettingsOpen(true), 1500);
-      } else if (!config.apiKey) {
-          // If no key provided and default fails
-          addLog(`>>> 请在设置中配置有效的 API Key 和 Base URL。`);
-          setTimeout(() => setIsSettingsOpen(true), 1500);
-      }
+      addLog(`❌ 节点离线。请检查 API Key 或 Base URL。`);
     }
   };
-
-  // Scheduler Effect
-  useEffect(() => {
-    const checkSchedule = () => {
-      const now = new Date();
-      const currentBeijingTime = new Date(now.getTime() + (beijingOffset + now.getTimezoneOffset()) * 60 * 1000);
-      const currentDateStr = currentBeijingTime.toDateString();
-
-      // Trigger at 09:00 AM Beijing Time
-      if (
-        currentBeijingTime.getHours() === 9 && 
-        currentBeijingTime.getMinutes() === 0 && 
-        lastAutoRunDate !== currentDateStr
-      ) {
-        if (status === AppStatus.IDLE || status === AppStatus.COMPLETED) {
-          addLog("⏰ 自动调度程序触发：北京时间 09:00");
-          setLastAutoRunDate(currentDateStr);
-          handleGenerate(true);
-        }
-      }
-    };
-
-    const timer = setInterval(checkSchedule, 10000); 
-    return () => clearInterval(timer);
-  }, [lastAutoRunDate, status]);
 
   const addLog = (msg: string) => {
-    setProgressLog(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
-    if (scrollRef.current) {
-        setTimeout(() => {
-            scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-        }, 100);
-    }
+    setProgressLog(prev => [...prev.slice(-49), `[${new Date().toLocaleTimeString()}] ${msg}`]);
+    setTimeout(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }), 50);
   };
 
-  const handleGenerate = async (isAutoRun = false) => {
-    if (status === AppStatus.GENERATING || status === AppStatus.SEARCHING) return;
+  const handleGenerate = async () => {
+    if (status === AppStatus.GENERATING || status === AppStatus.SEARCHING || cooldown > 0) return;
 
-    setData(null);
     setStatus(AppStatus.SEARCHING);
-    addLog(`启动自动化序列。目标日期: ${targetDateStr}`);
+    addLog(`🚀 启动生成序列 | 目标日期: ${targetDateStr}`);
     
-    const currentModel = userConfig.modelId || PRIMARY_MODEL;
-
     try {
-      addLog("正在调用 Search Tool 进行链接验证...");
-      await new Promise(r => setTimeout(r, 800)); 
-      addLog("正在从全球源检索索引...");
-      
-      setStatus(AppStatus.GENERATING);
-      addLog(`正在使用 ${currentModel} 合成双语内容...`);
-      
+      addLog("🔍 正在检索实时新闻数据 (可能需要 15-30 秒)...");
       const result = await generateBriefing(targetDateStr, userConfig);
-      
       setData(result);
       setStatus(AppStatus.COMPLETED);
-      addLog("✅ 序列完成。内容已准备就绪。");
-
-      if (isAutoRun) {
-        await executeEmailSend(result, true);
-      }
-
+      addLog("✅ 生成成功！");
     } catch (e: any) {
-      console.error(e);
       setStatus(AppStatus.ERROR);
+      const isRateLimit = e.message.includes("429");
+      addLog(`❌ 失败: ${e.message}`);
       
-      let errorMsg = e.message || "未知错误";
-      if (errorMsg.includes("400") || errorMsg.includes("API key not valid")) {
-        errorMsg = `认证失败 (400)。Key 无效或 Base URL 缺失。`;
-      } else if (errorMsg.includes("404")) {
-         errorMsg = `模型未找到 (404)。请尝试在设置中切换为 gemini-1.5-pro`;
-      } else if (errorMsg.includes("Hallucination")) {
-         errorMsg = `内容校验失败 (幻觉检测)。请检查模型联网权限。`;
-      }
-
-      addLog(`❌ 生成出错: ${errorMsg}`);
-      
-      // Auto-open settings on generation error too
-      if (errorMsg.includes("400") || errorMsg.includes("404")) {
-         setTimeout(() => setIsSettingsOpen(true), 2000);
+      if (isRateLimit) {
+        addLog("⚠️ 系统过载。已触发安全冷却机制 (30秒)。");
+        setCooldown(30);
       }
     }
   };
 
-  const executeEmailSend = async (content: GeneratedContent | null, isAuto: boolean) => {
+  const executeEmailSend = async (content: GeneratedContent | null) => {
     const activeEmails = emails.filter(e => e.trim() !== '');
-    if (activeEmails.length === 0) {
-      addLog(isAuto ? "⚠️ 自动任务完成，但未配置接收邮箱。" : "⚠️ 请先输入有效的邮箱地址");
-      return;
-    }
-    
-    if (!content) {
-        addLog("⚠️ 无内容可发送。请先生成简报。");
-        return;
-    }
-
-    addLog(`📧 ${isAuto ? '自动' : '手动'}推送：正在发送邮件至 ${activeEmails.length} 个地址...`);
+    if (activeEmails.length === 0 || !content) return;
     setIsSendingEmail(true);
-    
+    addLog(`📧 正在推送至 ${activeEmails.length} 个地址...`);
     const result = await sendEmail(activeEmails, content);
-    
-    if (result.success) {
-      addLog(`>>> ✅ ${result.message}`);
-    } else {
-      addLog(`>>> ❌ ${result.message}`);
-    }
+    addLog(result.success ? `✅ ${result.message}` : `❌ ${result.message}`);
     setIsSendingEmail(false);
   };
 
-  const handleEmailChange = (index: number, value: string) => {
-    const newEmails = [...emails];
-    newEmails[index] = value;
-    setEmails(newEmails);
-  };
-
   return (
-    <div className="min-h-screen relative text-gray-200 selection:bg-indigo-500/30">
+    <div className="min-h-screen relative text-gray-200 selection:bg-indigo-500/30 font-sans">
       <SettingsModal 
         isOpen={isSettingsOpen} 
         onClose={() => setIsSettingsOpen(false)}
-        onSave={handleSaveConfig}
+        onSave={(c) => { setUserConfig(c); localStorage.setItem('aurora_config', JSON.stringify(c)); initConnection(c); }}
         initialConfig={userConfig}
       />
 
-      {/* Aurora Background */}
-      <div className="fixed inset-0 pointer-events-none z-0">
-         <div className="absolute top-[-20%] left-[20%] w-[600px] h-[600px] bg-purple-900/20 rounded-full blur-[120px] mix-blend-screen animate-pulse"></div>
-         <div className="absolute top-[-10%] right-[10%] w-[500px] h-[500px] bg-blue-900/20 rounded-full blur-[100px] mix-blend-screen"></div>
-         <div className="absolute bottom-[-10%] left-[10%] w-[600px] h-[600px] bg-indigo-900/10 rounded-full blur-[120px] mix-blend-screen"></div>
-         <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 brightness-100 contrast-150"></div>
-      </div>
+      <div className="fixed inset-0 pointer-events-none z-0 aurora-gradient"></div>
 
-      <div className="relative z-10 max-w-7xl mx-auto px-4 py-8 lg:px-8">
-        
-        {/* Header Section */}
+      <div className="relative z-10 max-w-7xl mx-auto px-4 py-8">
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-12">
           <div>
-            <h1 className="text-4xl font-light tracking-tight text-white mb-2 font-display">
-              Aurora <span className="font-semibold text-transparent bg-clip-text bg-gradient-to-r from-blue-300 to-purple-300">News Insight</span>
-            </h1>
-            <p className="text-gray-400 font-light flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-emerald-400" />
-              多源验证检索系统
-              <span className="text-gray-600">|</span>
-              <span className="text-xs font-mono opacity-60">BUILD 2025.12.18</span>
-            </p>
+            <h1 className="text-4xl font-light text-white mb-2">Aurora <span className="font-semibold text-transparent bg-clip-text bg-gradient-to-r from-blue-300 to-purple-300">News</span></h1>
+            <p className="text-gray-500 text-sm flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-emerald-500" />多源检索验证系统</p>
           </div>
-          
           <div className="flex items-center gap-4">
-            <div className="text-right hidden md:block">
-              <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">北京时间 (Beijing Time)</div>
-              <div className="font-mono text-xl text-white">{displayTime}</div>
-            </div>
             <StatusBadge status={status === AppStatus.ERROR ? 'offline' : (status === AppStatus.IDLE || status === AppStatus.COMPLETED ? 'online' : 'busy')} />
-            
-            <button 
-              onClick={() => setIsSettingsOpen(true)}
-              className="p-2 rounded-full bg-white/5 hover:bg-white/10 border border-white/5 transition-colors"
-            >
-              <Settings className="w-5 h-5 text-gray-300" />
-            </button>
+            <button onClick={() => setIsSettingsOpen(true)} className="p-2 rounded-full bg-white/5 hover:bg-white/10 transition-colors"><Settings className="w-5 h-5" /></button>
           </div>
         </header>
 
-        {/* Dashboard Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
-          {/* Left Column: Controls & Stats */}
+          {/* Controls */}
           <div className="lg:col-span-4 space-y-6">
-            
-            {/* Control Panel */}
-            <GlassCard className="space-y-6">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-medium text-white flex items-center gap-2">
-                  <Server className="w-5 h-5 text-blue-400" />
-                  控制中心
-                </h2>
-                <div className="h-2 w-2 rounded-full bg-blue-500 animate-pulse"></div>
-              </div>
-
+            <GlassCard>
+              <h2 className="text-lg font-medium text-white mb-6 flex items-center gap-2"><Server className="w-5 h-5 text-blue-400" />系统控制</h2>
               <div className="space-y-4">
-                <div className="bg-black/40 rounded-lg p-4 border border-white/5">
-                  <div className="flex justify-between text-sm mb-2">
-                    <span className="text-gray-400">目标日期</span>
-                    <span className="text-white font-mono">{targetDateStr}</span>
-                  </div>
-                  <div className="flex justify-between text-sm mb-2">
-                     <span className="text-gray-400">模型节点</span>
-                     <span className="text-emerald-400 font-mono text-xs truncate max-w-[150px] text-right" title={userConfig.modelId || PRIMARY_MODEL}>
-                       {userConfig.modelId || PRIMARY_MODEL}
-                     </span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-400">下次自动运行</span>
-                    <span className="text-blue-300 font-mono">09:00:00 CST</span>
-                  </div>
+                <div className="bg-black/40 rounded-lg p-4 text-sm font-mono space-y-2">
+                  <div className="flex justify-between"><span className="text-gray-500">日期:</span><span>{targetDateStr}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-500">当前节点:</span><span className="text-emerald-400 truncate max-w-[120px]">{userConfig.modelId || PRIMARY_MODEL}</span></div>
                 </div>
 
                 <button
-                  onClick={() => handleGenerate(false)}
-                  disabled={status === AppStatus.SEARCHING || status === AppStatus.GENERATING}
-                  className={`w-full py-4 rounded-xl flex items-center justify-center gap-2 transition-all duration-300 relative overflow-hidden group ${
-                    status === AppStatus.SEARCHING || status === AppStatus.GENERATING 
-                    ? 'bg-gray-800 cursor-not-allowed opacity-50' 
-                    : 'bg-white text-black hover:bg-gray-100'
+                  onClick={handleGenerate}
+                  disabled={status === AppStatus.SEARCHING || status === AppStatus.GENERATING || cooldown > 0}
+                  className={`w-full py-4 rounded-xl flex items-center justify-center gap-2 transition-all relative overflow-hidden ${
+                    cooldown > 0 || status === AppStatus.SEARCHING || status === AppStatus.GENERATING 
+                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed' 
+                    : 'bg-white text-black hover:bg-blue-50'
                   }`}
                 >
-                  {status === AppStatus.SEARCHING || status === AppStatus.GENERATING ? (
-                    <>
-                      <RefreshCw className="w-5 h-5 animate-spin" />
-                      <span>Processing...</span>
-                    </>
+                  {cooldown > 0 ? (
+                    <><Timer className="w-5 h-5" /><span>冷却中 ({cooldown}s)</span></>
+                  ) : status === AppStatus.SEARCHING || status === AppStatus.GENERATING ? (
+                    <><RefreshCw className="w-5 h-5 animate-spin" /><span>处理中...</span></>
                   ) : (
-                    <>
-                      <Sparkles className="w-5 h-5" />
-                      <span>Start Generation Sequence</span>
-                    </>
+                    <><Sparkles className="w-5 h-5" /><span>开始生成简报</span></>
                   )}
                 </button>
               </div>
             </GlassCard>
 
-            {/* Terminal / Log */}
+            {/* Log */}
             <GlassCard className="h-[250px] flex flex-col">
-              <div className="flex items-center gap-2 mb-4 border-b border-white/5 pb-2">
-                <Activity className="w-4 h-4 text-emerald-400" />
-                <span className="text-xs font-mono uppercase tracking-wider text-gray-400">System Log</span>
+              <div className="flex items-center gap-2 mb-4 text-xs font-mono uppercase text-gray-500 border-b border-white/5 pb-2">
+                <Activity className="w-4 h-4 text-emerald-500" />系统日志
               </div>
-              <div 
-                ref={scrollRef}
-                className="flex-grow overflow-y-auto font-mono text-xs space-y-2 pr-2 text-gray-400"
-              >
-                {progressLog.length === 0 && <span className="opacity-30">Waiting for commands...</span>}
-                {progressLog.map((log, i) => (
-                  <div key={i} className="border-l-2 border-white/10 pl-2 py-0.5 animate-scanline">
-                    <span className="text-blue-500 mr-2">$</span>
-                    {log}
-                  </div>
-                ))}
+              <div ref={scrollRef} className="flex-grow overflow-y-auto font-mono text-[10px] space-y-1.5 text-gray-400 pr-2">
+                {progressLog.map((log, i) => <div key={i} className="animate-scanline"><span className="text-blue-500 mr-2">›</span>{log}</div>)}
               </div>
             </GlassCard>
 
-            {/* Email Config */}
-             <GlassCard className="space-y-4">
-              <div className="flex items-center gap-2 text-white font-medium">
-                <Mail className="w-4 h-4 text-purple-400" />
-                <span>自动推送设置</span>
-              </div>
+            {/* Email */}
+            <GlassCard className="space-y-4">
+              <div className="flex items-center gap-2 text-white font-medium text-sm"><Mail className="w-4 h-4 text-purple-400" />推送列表</div>
               <div className="space-y-2">
-                {emails.map((email, idx) => (
-                  <input
-                    key={idx}
-                    type="email"
-                    placeholder={`Recipient ${idx + 1}`}
-                    value={email}
-                    onChange={(e) => handleEmailChange(idx, e.target.value)}
-                    className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-300 focus:outline-none focus:border-blue-500/50 transition-colors"
-                  />
+                {emails.map((e, idx) => (
+                  <input key={idx} type="email" placeholder={`邮箱 ${idx + 1}`} value={e} onChange={(ev) => { const n = [...emails]; n[idx] = ev.target.value; setEmails(n); }} className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-300 focus:border-blue-500/50 outline-none transition-colors" />
                 ))}
               </div>
-              <button 
-                onClick={() => executeEmailSend(data, false)}
-                disabled={isSendingEmail || !data}
-                className="w-full py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-sm text-gray-300 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-              >
-                {isSendingEmail ? <RefreshCw className="w-3 h-3 animate-spin"/> : <Send className="w-3 h-3" />}
-                Send Manual Test
+              <button onClick={() => executeEmailSend(data)} disabled={isSendingEmail || !data} className="w-full py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-xs text-gray-300 transition-colors flex items-center justify-center gap-2 disabled:opacity-50">
+                {isSendingEmail ? <RefreshCw className="w-3 h-3 animate-spin"/> : <Send className="w-3 h-3" />}发送预览邮件
               </button>
             </GlassCard>
-
           </div>
 
-          {/* Right Column: Content */}
+          {/* Result Content */}
           <div className="lg:col-span-8 space-y-6">
             {!data ? (
               <GlassCard className="h-full min-h-[500px] flex flex-col items-center justify-center text-center p-12">
-                <div className="w-24 h-24 bg-white/5 rounded-full flex items-center justify-center mb-6 relative">
-                  <div className="absolute inset-0 rounded-full border border-white/10 animate-ping opacity-20"></div>
-                  <Globe className="w-10 h-10 text-gray-500" />
+                <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-6 relative">
+                  <Globe className="w-10 h-10 text-gray-600" />
                 </div>
-                <h3 className="text-xl font-light text-white mb-2">Ready to Synchronize</h3>
-                <p className="text-gray-500 max-w-md">
-                  Waiting for retrieval command. System will verify links, translate content, and generate viral headers using Gemini 1.5 Pro.
-                </p>
+                <h3 className="text-xl font-light text-white mb-2">等待同步指令</h3>
+                <p className="text-gray-500 text-sm max-w-sm">点击左侧“开始生成简报”，系统将通过 Gemini 模型进行全球实时新闻检索与双语摘要合成。</p>
               </GlassCard>
             ) : (
               <div className="space-y-6 animate-scanline">
-                
-                {/* Viral Headers */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* General Viral */}
-                  <GlassCard className="bg-gradient-to-br from-pink-500/10 to-transparent border-pink-500/20">
-                    <h3 className="text-pink-400 font-bold mb-3 flex items-center gap-2">
-                      <Sparkles className="w-4 h-4" />
-                      Global Viral
-                    </h3>
-                    <ul className="space-y-2">
-                      {data.viral_titles.map((t, i) => (
-                        <li key={i} className="text-sm text-gray-200 border-l-2 border-pink-500/30 pl-3 py-1">
-                          <TypewriterText text={t} speed={20} />
-                        </li>
-                      ))}
-                    </ul>
+                  <GlassCard className="bg-pink-500/5 border-pink-500/20">
+                    <h3 className="text-pink-400 font-bold mb-3 flex items-center gap-2 text-sm"><Sparkles className="w-4 h-4" />全球热点</h3>
+                    <ul className="space-y-2 text-sm">{data.viral_titles.map((t, i) => <li key={i} className="border-l-2 border-pink-500/30 pl-3 py-1"><TypewriterText text={t} speed={20} /></li>)}</ul>
                   </GlassCard>
-
-                  {/* Medical Viral */}
-                  <GlassCard className="bg-gradient-to-br from-emerald-500/10 to-transparent border-emerald-500/20">
-                    <h3 className="text-emerald-400 font-bold mb-3 flex items-center gap-2">
-                      <Stethoscope className="w-4 h-4" />
-                      Health Viral
-                    </h3>
-                    <ul className="space-y-2">
-                      {data.medical_viral_titles?.map((t, i) => (
-                        <li key={i} className="text-sm text-gray-200 border-l-2 border-emerald-500/30 pl-3 py-1">
-                          <TypewriterText text={t} speed={20} />
-                        </li>
-                      )) || <li className="text-gray-500 text-sm italic">No viral health topics today.</li>}
-                    </ul>
+                  <GlassCard className="bg-emerald-500/5 border-emerald-500/20">
+                    <h3 className="text-emerald-400 font-bold mb-3 flex items-center gap-2 text-sm"><Stethoscope className="w-4 h-4" />健康趋势</h3>
+                    <ul className="space-y-2 text-sm">{data.medical_viral_titles?.map((t, i) => <li key={i} className="border-l-2 border-emerald-500/30 pl-3 py-1"><TypewriterText text={t} speed={20} /></li>)}</ul>
                   </GlassCard>
                 </div>
 
-                {/* News Sections */}
-                <div className="space-y-6">
-                  <div>
-                    <h3 className="text-xl text-blue-400 font-light mb-4 flex items-center gap-2">
-                      <Globe className="w-5 h-5" /> Global Affairs
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {data.general_news.map((item, i) => (
-                        <NewsCard key={i} item={item} idx={i} color="blue" />
-                      ))}
-                    </div>
-                  </div>
-
-                  <div>
-                    <h3 className="text-xl text-emerald-400 font-light mb-4 flex items-center gap-2">
-                      <HeartPulse className="w-5 h-5" /> Medical & Science
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {data.medical_news.map((item, i) => (
-                        <NewsCard key={i} item={item} idx={i} color="emerald" />
-                      ))}
-                    </div>
-                  </div>
+                <div className="space-y-8">
+                  <section>
+                    <h3 className="text-blue-400 font-light mb-4 flex items-center gap-2"><Globe className="w-5 h-5" /> 全球时政</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{data.general_news.map((item, i) => <NewsCard key={i} item={item} idx={i} color="blue" />)}</div>
+                  </section>
+                  <section>
+                    <h3 className="text-emerald-400 font-light mb-4 flex items-center gap-2"><HeartPulse className="w-5 h-5" /> 医学前沿</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{data.medical_news.map((item, i) => <NewsCard key={i} item={item} idx={i} color="emerald" />)}</div>
+                  </section>
                 </div>
-
               </div>
             )}
           </div>
-
         </div>
       </div>
     </div>

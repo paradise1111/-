@@ -18,7 +18,6 @@ export default async function handler(request, response) {
     try { return decodeURIComponent(val); } catch (e) { return val; }
   };
 
-  // 1. Config Parsing
   const customApiKey = getHeader('x-custom-api-key');
   const customBaseUrl = getHeader('x-custom-base-url');
   const customModel = getHeader('x-custom-model');
@@ -28,7 +27,6 @@ export default async function handler(request, response) {
   apiKey = apiKey.trim().replace(/^['"]|['"]$/g, '');
 
   let baseUrl = customBaseUrl || 'https://api.openai.com/v1';
-  // Normalize Base URL
   baseUrl = baseUrl.replace(/\/$/, '');
   if (!baseUrl.endsWith('/v1') && !baseUrl.includes('openai.azure.com')) {
      baseUrl = `${baseUrl}/v1`;
@@ -38,9 +36,6 @@ export default async function handler(request, response) {
   if (request.method === 'GET' && request.query.action === 'list_models') {
     try {
       let targetUrl = `${baseUrl}/models`;
-
-      console.log(`[Proxy List] Forwarding to: ${targetUrl}`);
-
       const proxyRes = await fetch(targetUrl, {
         method: 'GET',
         headers: {
@@ -48,6 +43,10 @@ export default async function handler(request, response) {
           'Content-Type': 'application/json'
         }
       });
+
+      if (proxyRes.status === 429) {
+          return response.status(429).json({ error: "Upstream Rate Limit (429). Please wait." });
+      }
 
       const contentType = proxyRes.headers.get("content-type");
       if (contentType && contentType.includes("text/html")) {
@@ -60,22 +59,12 @@ export default async function handler(request, response) {
       }
 
       const data = await proxyRes.json();
-      let models = [];
-      if (data.data) models = data.data;
-      else if (data.models) models = data.models;
-      else if (Array.isArray(data)) models = data;
-
+      let models = data.data || data.models || (Array.isArray(data) ? data : []);
       return response.status(200).json({ success: true, models: models });
 
     } catch (error) {
-      console.error("List Proxy Failed:", error);
       return response.status(500).json({ error: error.message });
     }
-  }
-
-  // --- Ping ---
-  if (request.method === 'GET' && request.query.check === 'true') {
-    return response.status(200).json({ success: true, msg: "Backend Online" });
   }
 
   // --- Generate ---
@@ -84,129 +73,52 @@ export default async function handler(request, response) {
       const { date } = request.body;
       if (!date) return response.status(400).json({ error: "Date is required" });
 
-      const client = new OpenAI({
-          apiKey: apiKey,
-          baseURL: baseUrl,
-      });
-      
+      const client = new OpenAI({ apiKey, baseURL: baseUrl });
       const primaryModel = customModel || process.env.GEMINI_MODEL_ID || 'gemini-1.5-pro';
       const fallbackModel = 'gpt-4o-mini';
 
-      const jsonStructure = `
-      {
-        "viral_titles": ["String (3 global news viral titles)"],
-        "medical_viral_titles": ["String (3 medical/health viral titles)"],
-        "general_news": [
-          {
-            "title_cn": "String",
-            "title_en": "String",
-            "summary_cn": "String",
-            "summary_en": "String",
-            "source_url": "String",
-            "source_name": "String"
-          }
-        ],
-        "medical_news": [
-          {
-            "title_cn": "String",
-            "title_en": "String",
-            "summary_cn": "String",
-            "summary_en": "String",
-            "source_url": "String",
-            "source_name": "String"
-          }
-        ],
-        "date": "YYYY-MM-DD"
-      }
-      `;
-
-      const systemPrompt = `
-        You are a senior news editor.
-        
-        CRITICAL: 
-        1. Retrieve REAL news for ${date} using Internet Search.
-        2. DO NOT HALLUCINATE. Source URLs must be valid and accessible.
-        3. If you cannot search, stop and return an error.
-
-        Task: Select 6 Global News and 6 Medical News from YESTERDAY.
-        Output: Bilingual JSON.
-        
-        Structure:
-        ${jsonStructure}
-      `;
-
       const attempt = async (mId, retryLevel = 0) => {
-         console.log(`Generating with ${mId} @ ${baseUrl} (Level ${retryLevel})`);
          try {
             const requestOptions = {
                 model: mId,
                 messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: `Search online for ${date} news.` }
+                    { role: "system", content: `You are an editor. Search real news for ${date}. No hallucinations. Bilingual JSON output.` },
+                    { role: "user", content: `Generate news briefing for ${date}` }
                 ],
                 response_format: { type: "json_object" }
             };
 
-            // Attempt to inject Google Search tool if model looks like Gemini
             if (mId.toLowerCase().includes('gemini')) {
-                requestOptions.tools = [
-                    {
-                        type: "function",
-                        function: {
-                            name: "google_search_retrieval",
-                            description: "Google Search",
-                            parameters: { type: "object", properties: {} }
-                        }
-                    }
-                ];
+                requestOptions.tools = [{ type: "function", function: { name: "google_search_retrieval", description: "Google Search", parameters: { type: "object", properties: {} } } }];
             }
 
             const completion = await client.chat.completions.create(requestOptions);
-
-            // SAFETY CHECK
             if (!completion || !completion.choices || completion.choices.length === 0) {
-                 throw new Error(`Invalid response structure from model: choices missing. Response: ${JSON.stringify(completion)}`);
+                 throw new Error("Empty choices in model response.");
             }
 
             const text = completion.choices[0].message.content;
-            const parsed = JSON.parse(text);
-
-            // Fake news validation
-            if (parsed.general_news && parsed.general_news.length > 0) {
-                 const url = parsed.general_news[0].source_url;
-                 if (!url || url === "String" || url.includes("example.com")) {
-                     throw new Error("Hallucination detected: Invalid source URLs.");
-                 }
-            }
-            
-            return parsed;
+            return JSON.parse(text);
          } catch (err) {
-             const msg = err.message || JSON.stringify(err);
-             console.warn(`Error with ${mId}: ${msg}`);
-
-             if (msg.includes("<!doctype html>") || msg.includes("<html")) {
-                 throw new Error("Upstream returned HTML (Dashboard) instead of JSON. Check Base URL.");
+             const msg = err.message || "";
+             if (msg.includes("429") || msg.includes("Rate limit")) {
+                 if (retryLevel < 1 && mId !== fallbackModel) {
+                     await new Promise(r => setTimeout(r, 1500));
+                     return attempt(fallbackModel, 1);
+                 }
+                 throw new Error("Upstream Rate Limit Exceeded (429). Please try later.");
              }
-             
              if (retryLevel === 0 && mId !== fallbackModel) {
-                 console.warn(`Falling back to ${fallbackModel}`);
                  return attempt(fallbackModel, 1);
              }
              throw err;
          }
       };
 
-      try {
-          const data = await attempt(primaryModel);
-          return response.status(200).json(data);
-      } catch (err) {
-          console.error("All generation attempts failed:", err);
-          const errorMsg = err.response ? JSON.stringify(err.response) : err.message;
-          return response.status(500).json({ error: errorMsg });
-      }
+      const data = await attempt(primaryModel);
+      return response.status(200).json(data);
 
     } catch (error) {
-      console.error("Global Error:", error);
       return response.status(500).json({ error: error.message });
     }
   }

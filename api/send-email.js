@@ -3,43 +3,45 @@
 export default async function handler(request, response) {
   response.setHeader('Access-Control-Allow-Credentials', true);
   response.setHeader('Access-Control-Allow-Origin', '*');
-  response.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-  response.setHeader(
-    'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
-  );
+  response.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (request.method === 'OPTIONS') {
-    response.status(200).end();
-    return;
+    return response.status(200).end();
   }
 
   if (request.method !== 'POST') {
     return response.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // Sanitize Config: Remove quotes and trim whitespace
+  // 1. Sanitize Config
   const resendApiKey = (process.env.RESEND_API_KEY || '').replace(/['"]/g, '').trim();
   
-  // Handle From Email
-  let fromEmailRaw = process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>';
-  let fromEmail = fromEmailRaw.replace(/['"]/g, '').trim();
-
-  // Basic validation for From Email
-  if (!fromEmail.includes('@') || !fromEmail.includes('.')) {
-      console.warn(`Invalid EMAIL_FROM format (${fromEmail}), reverting to default.`);
-      fromEmail = 'Aurora News <onboarding@resend.dev>';
+  // Clean From Email
+  // Resend requires a specific format: "Name <email@domain.com>" or "email@domain.com"
+  let fromEmailRaw = (process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>').replace(/['"]/g, '').trim();
+  
+  // Safety check: ensure fromEmail has a valid look
+  if (!fromEmailRaw.includes('<') && fromEmailRaw.includes(' ')) {
+      // If it looks like "Aurora News onboarding@resend.dev" fix it to "Aurora News <onboarding@resend.dev>"
+      const parts = fromEmailRaw.split(' ');
+      const emailPart = parts.pop();
+      fromEmailRaw = `${parts.join(' ')} <${emailPart}>`;
+  }
+  
+  if (!fromEmailRaw.includes('@')) {
+      fromEmailRaw = 'Aurora News <onboarding@resend.dev>';
   }
 
   if (!resendApiKey) {
-    return response.status(500).json({ error: 'Server configuration error: Missing Resend API Key' });
+    return response.status(500).json({ error: 'Missing RESEND_API_KEY' });
   }
 
   try {
     const { to, subject, html } = request.body;
 
     if (!to || !subject || !html) {
-      return response.status(400).json({ error: 'Missing required fields' });
+      return response.status(400).json({ error: 'Missing fields' });
     }
 
     const resendRes = await fetch('https://api.resend.com/emails', {
@@ -49,8 +51,8 @@ export default async function handler(request, response) {
         'Authorization': `Bearer ${resendApiKey}`
       },
       body: JSON.stringify({
-        from: fromEmail, 
-        to: to,
+        from: fromEmailRaw, 
+        to: Array.isArray(to) ? to : [to],
         subject: subject,
         html: html,
       }),
@@ -58,12 +60,11 @@ export default async function handler(request, response) {
 
     if (!resendRes.ok) {
       const errorText = await resendRes.text();
-      // Parse JSON error if possible to be cleaner
       try {
           const errObj = JSON.parse(errorText);
-          throw new Error(`Resend Error: ${errObj.message || errorText}`);
+          return response.status(resendRes.status).json({ error: errObj.message || errorText });
       } catch (e) {
-          throw new Error(`Resend API rejected: ${errorText}`);
+          return response.status(resendRes.status).json({ error: errorText });
       }
     }
 
@@ -71,7 +72,6 @@ export default async function handler(request, response) {
     return response.status(200).json(data);
 
   } catch (error) {
-    console.error('Email sending failed:', error);
     return response.status(500).json({ error: error.message });
   }
 }
