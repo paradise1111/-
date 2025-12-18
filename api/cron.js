@@ -21,6 +21,9 @@ export default async function handler(request, response) {
   const resendApiKey = process.env.RESEND_API_KEY;
   const fromEmail = process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>';
   
+  // 获取配置的模型ID，默认 gemini-3-pro-preview
+  const modelId = process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
+
   // 从环境变量获取收件人列表 (逗号分隔)
   // 例如: "user1@example.com,user2@example.com"
   const recipientsEnv = process.env.RECIPIENT_LIST;
@@ -79,15 +82,21 @@ export default async function handler(request, response) {
       - 中英双语对照。
     `;
 
-    console.log(`Generating content for date: ${targetDateStr}...`);
-    const genResponse = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
-      contents: prompt,
-      config: {
+    console.log(`Generating content for date: ${targetDateStr} using model: ${modelId}...`);
+    
+    // 判断是否是 Gemini 原生模型，如果是则尝试开启 Thinking (可选)
+    // 为了稳妥起见，自动任务中我们默认关闭 thinkingConfig，除非你非常确定你的模型支持。
+    // 如果需要开启，可以在这里手动添加 thinkingConfig
+    const config = {
         tools: [{ googleSearch: {} }],
         responseMimeType: "application/json",
         responseSchema: responseSchema,
-      },
+    };
+
+    const genResponse = await ai.models.generateContent({
+      model: modelId,
+      contents: prompt,
+      config: config,
     });
 
     const content = JSON.parse(genResponse.text);

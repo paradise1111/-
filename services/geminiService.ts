@@ -2,28 +2,26 @@ import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { GeneratedContent, NewsItem } from "../types";
 
 // Initialize the client
-// 支持自定义 Base URL (用于中转/代理 API)
-// 如果 process.env.GEMINI_BASE_URL 存在，SDK 将使用该地址替代默认的 googleapis.com
 const ai = new GoogleGenAI({ 
-  apiKey: process.env.API_KEY,
-  baseUrl: process.env.GEMINI_BASE_URL || undefined
+  apiKey: process.env.API_KEY
 });
 
-// Using the PRO model for complex reasoning and JSON formatting
-const PRIMARY_MODEL = 'gemini-3-pro-preview';
-// Fallback to Flash for better stability/speed if Pro fails
-const FALLBACK_MODEL = 'gemini-3-flash-preview'; 
+// 配置模型: 优先使用环境变量中指定的模型 ID
+// 如果没有指定，则默认使用 gemini-3-pro-preview
+export const PRIMARY_MODEL = process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
+// 备用模型也可以配置，默认 gemini-3-flash-preview
+export const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL_ID || 'gemini-3-flash-preview'; 
 
 export const checkConnectivity = async (): Promise<boolean> => {
   try {
-    // Simple handshake
+    // 使用主模型进行握手，确保你选择的那个模型是可用的
     const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview', // Use flash for quick check
+      model: PRIMARY_MODEL, 
       contents: 'ping',
     });
     return !!response.text;
   } catch (error) {
-    console.error("Connectivity check failed:", error);
+    console.error(`Connectivity check failed for model ${PRIMARY_MODEL}:`, error);
     return false;
   }
 };
@@ -102,9 +100,11 @@ export const generateBriefing = async (targetDate: string): Promise<GeneratedCon
         responseSchema: responseSchema,
       };
 
-      // Only add thinking config if explicitly requested
+      // 只有显式指定的 Gemini 2.5/3 系列模型才开启 Thinking
+      // 如果使用自定义模型 (如 gpt-4o, claude)，通常不支持 thinkingConfig 参数，需要通过逻辑判断关闭
+      // 这里简单处理：只有当 useThinking 为 true 且不是自定义模型时才加，或者依赖 try-catch 回退
       if (useThinking) {
-        config.thinkingConfig = { thinkingBudget: 1024 }; // Reduced budget to avoid timeouts
+        config.thinkingConfig = { thinkingBudget: 1024 }; 
       }
 
       const response = await ai.models.generateContent({
@@ -122,7 +122,8 @@ export const generateBriefing = async (targetDate: string): Promise<GeneratedCon
       if (retryCount > 0) {
         console.warn(`Generation failed with model ${model} (Thinking: ${useThinking}). Retrying in 1s...`, error);
         await delay(1000);
-        return executeGeneration(model, useThinking, retryCount - 1);
+        // Retry with thinking disabled if it failed initially
+        return executeGeneration(model, false, retryCount - 1);
       }
       throw error;
     }
@@ -130,13 +131,19 @@ export const generateBriefing = async (targetDate: string): Promise<GeneratedCon
 
   // Stability Priority Strategy
   try {
-    return await executeGeneration(PRIMARY_MODEL, true, 0); 
+    // 默认首选尝试：使用主模型。如果是 Gemini 原生模型，尝试开启 Thinking (需自行判断模型是否支持，这里先默认开启尝试)
+    // 如果是第三方模型，Thinking 可能会导致报错，catch 住后会回退到 false
+    // 为了稳妥，如果用户设置了自定义 ID，我们默认先不开启 Thinking，除非确认支持
+    const isGeminiNative = PRIMARY_MODEL.includes('gemini-3') || PRIMARY_MODEL.includes('gemini-2.5');
+    return await executeGeneration(PRIMARY_MODEL, isGeminiNative, 0); 
   } catch (e1) {
-    console.warn("Primary strategy failed. Attempting failover 1 (Pro without thinking)...", e1);
+    console.warn(`Primary strategy (${PRIMARY_MODEL}) failed. Attempting retry...`, e1);
     try {
+       // 重试主模型，关闭 Thinking
       return await executeGeneration(PRIMARY_MODEL, false, 1); 
     } catch (e2) {
-      console.warn("Failover 1 failed. Attempting failover 2 (Flash)...", e2);
+      console.warn(`Retry failed. Attempting fallback model (${FALLBACK_MODEL})...`, e2);
+      // 只有当主模型彻底失败，才使用备用模型
       return await executeGeneration(FALLBACK_MODEL, false, 1); 
     }
   }

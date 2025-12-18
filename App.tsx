@@ -3,7 +3,7 @@ import { Activity, Globe, HeartPulse, RefreshCw, Server, ShieldCheck, Sparkles, 
 import { GlassCard } from './components/GlassCard';
 import { StatusBadge } from './components/StatusBadge';
 import { TypewriterText } from './components/TypewriterText';
-import { checkConnectivity, generateBriefing } from './services/geminiService';
+import { checkConnectivity, generateBriefing, PRIMARY_MODEL } from './services/geminiService';
 import { sendEmail } from './services/emailService';
 import { AppStatus, GeneratedContent, NewsItem } from './types';
 
@@ -38,14 +38,14 @@ export default function App() {
     // Initial Connectivity Check
     const init = async () => {
       setStatus(AppStatus.CONNECTING);
-      addLog("正在初始化与 Gemini Pro 网关的安全握手...");
+      addLog(`正在初始化与 AI 网关的连接... 目标模型: ${PRIMARY_MODEL}`);
       const isConnected = await checkConnectivity();
       if (isConnected) {
         setStatus(AppStatus.IDLE);
-        addLog("握手成功。延迟: 145ms。节点: gemini-3-flash-preview");
+        addLog(`握手成功。通信链路正常。当前节点: ${PRIMARY_MODEL}`);
       } else {
         setStatus(AppStatus.ERROR);
-        addLog("严重错误: 无法连接至 AI 网关。");
+        addLog(`严重错误: 无法连接至模型 ${PRIMARY_MODEL}。请检查 API Key 或网络配置。`);
       }
     };
     init();
@@ -94,12 +94,12 @@ export default function App() {
     addLog(`启动自动化序列。目标日期: ${targetDateStr}`);
     
     try {
-      addLog("正在调用 Google Search Grounding 进行链接验证...");
+      addLog("正在调用 Search Tool 进行链接验证...");
       await new Promise(r => setTimeout(r, 800)); 
-      addLog("正在从全球源检索昨日索引...");
+      addLog("正在从全球源检索索引...");
       
       setStatus(AppStatus.GENERATING);
-      addLog("正在使用 gemini-3-pro-preview 合成双语内容 (含医学爆款标题)...");
+      addLog(`正在使用 ${PRIMARY_MODEL} 合成双语内容...`);
       
       const result = await generateBriefing(targetDateStr);
       
@@ -208,7 +208,8 @@ export default function App() {
                   </div>
                   <div className="flex justify-between text-sm mb-2">
                      <span className="text-gray-400">模型节点</span>
-                     <span className="text-emerald-400 font-mono text-xs">gemini-3-pro-preview</span>
+                     {/* Display the actual model ID being used */}
+                     <span className="text-emerald-400 font-mono text-xs truncate max-w-[150px] text-right" title={PRIMARY_MODEL}>{PRIMARY_MODEL}</span>
                   </div>
                   <div className="flex justify-between text-sm">
                     <span className="text-gray-400">下次自动运行</span>
