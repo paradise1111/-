@@ -14,9 +14,15 @@ export default async function handler(request, response) {
     return;
   }
 
-  const apiKey = process.env.API_KEY;
+  let apiKey = process.env.API_KEY;
   if (!apiKey) {
     return response.status(500).json({ error: "Server configuration error: API_KEY is missing." });
+  }
+
+  // 关键修复：清洗 API Key，去除可能存在的空格或引号 (常见配置错误)
+  apiKey = apiKey.trim();
+  if ((apiKey.startsWith('"') && apiKey.endsWith('"')) || (apiKey.startsWith("'") && apiKey.endsWith("'"))) {
+    apiKey = apiKey.slice(1, -1);
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -36,6 +42,7 @@ export default async function handler(request, response) {
       return response.status(200).json({ success: true, model: PRIMARY_MODEL });
     } catch (error) {
       console.error("Connectivity check failed:", error);
+      // 返回具体的错误信息以便调试
       return response.status(500).json({ success: false, error: error.message });
     }
   }

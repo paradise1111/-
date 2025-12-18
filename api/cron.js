@@ -1,3 +1,4 @@
+
 // api/cron.js
 // 这是一个由 Vercel Cron 触发的后端任务
 // 它不依赖前端浏览器，完全在服务器端运行
@@ -10,13 +11,11 @@ export default async function handler(request, response) {
   // if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
   //   return response.status(401).json({ success: false });
   // }
-  // 注意：在 Vercel 免费版或简单测试中，CRON_SECRET 验证可能会有些复杂
-  // 如果你发现定时任务报错 401，可以暂时注释掉上面的验证代码
-
+  
   console.log("⏰ Cron Job Started: Generating Daily Briefing...");
 
   // 2. 准备环境变量
-  const apiKey = process.env.API_KEY;
+  let apiKey = process.env.API_KEY;
   const resendApiKey = process.env.RESEND_API_KEY;
   const fromEmail = process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>';
   
@@ -24,13 +23,18 @@ export default async function handler(request, response) {
   const modelId = process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
 
   // 从环境变量获取收件人列表 (逗号分隔)
-  // 例如: "user1@example.com,user2@example.com"
   const recipientsEnv = process.env.RECIPIENT_LIST;
   const recipients = recipientsEnv ? recipientsEnv.split(',').map(e => e.trim()) : [];
 
   if (!apiKey || !resendApiKey || recipients.length === 0) {
     console.error("Missing configuration (API_KEY, RESEND_API_KEY, or RECIPIENT_LIST)");
     return response.status(500).json({ error: "Configuration missing" });
+  }
+
+  // 清洗 API Key
+  apiKey = apiKey.trim();
+  if ((apiKey.startsWith('"') && apiKey.endsWith('"')) || (apiKey.startsWith("'") && apiKey.endsWith("'"))) {
+    apiKey = apiKey.slice(1, -1);
   }
 
   // 3. 计算日期 (北京时间昨天)
@@ -98,7 +102,7 @@ export default async function handler(request, response) {
     const content = JSON.parse(genResponse.text);
     console.log("Content generated successfully.");
 
-    // 5. 生成 HTML (简化版)
+    // 5. 生成 HTML
     const generateHtml = (data) => {
       const listItems = (items, color) => items.map(item => `
         <div style="margin-bottom: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 8px;">

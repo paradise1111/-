@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Activity, Globe, HeartPulse, RefreshCw, Server, ShieldCheck, Sparkles, Mail, Clock, Send, Stethoscope } from 'lucide-react';
+import { Activity, Globe, HeartPulse, RefreshCw, Server, ShieldCheck, Sparkles, Mail, Clock, Send, Stethoscope, AlertTriangle } from 'lucide-react';
 import { GlassCard } from './components/GlassCard';
 import { StatusBadge } from './components/StatusBadge';
 import { TypewriterText } from './components/TypewriterText';
@@ -12,6 +12,22 @@ interface NewsCardProps {
   idx: number;
   color: 'blue' | 'emerald';
 }
+
+const NewsCard: React.FC<NewsCardProps> = ({ item, idx, color }) => (
+  <GlassCard className="h-full flex flex-col" delay={idx * 100}>
+    <div className="flex justify-between items-start mb-3">
+      <span className={`text-xs font-mono px-2 py-1 rounded border ${color === 'blue' ? 'border-blue-500/30 text-blue-300' : 'border-emerald-500/30 text-emerald-300'}`}>
+        {item.source_name || 'Source'}
+      </span>
+      <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="text-gray-500 hover:text-white transition-colors">
+        <Globe size={14} />
+      </a>
+    </div>
+    <h3 className="text-lg font-medium text-white mb-1 leading-snug">{item.title_cn}</h3>
+    <p className="text-xs text-gray-500 mb-3 font-light">{item.title_en}</p>
+    <p className="text-sm text-gray-300 leading-relaxed flex-grow">{item.summary_cn}</p>
+  </GlassCard>
+);
 
 export default function App() {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -45,7 +61,7 @@ export default function App() {
         addLog(`握手成功。通信链路正常。当前节点: ${PRIMARY_MODEL}`);
       } else {
         setStatus(AppStatus.ERROR);
-        addLog(`严重错误: 无法连接至模型 ${PRIMARY_MODEL}。请检查 API Key 或网络配置。`);
+        addLog(`严重错误: 无法连接至模型 ${PRIMARY_MODEL}。请检查 API Key 权限或后台日志。`);
       }
     };
     init();
@@ -114,7 +130,16 @@ export default function App() {
     } catch (e: any) {
       console.error(e);
       setStatus(AppStatus.ERROR);
-      addLog(`生成过程中出错: ${e.message || "未知错误"}`);
+      
+      // 用户友好的错误解析
+      let errorMsg = e.message || "未知错误";
+      if (errorMsg.includes("API key not valid") || errorMsg.includes("400")) {
+        errorMsg = "API Key 无效 (400)。请检查 .env 中的 Key 是否包含多余空格或引号。";
+      } else if (errorMsg.includes("API_KEY is missing")) {
+        errorMsg = "服务器未配置 API_KEY。请在 Vercel 后台添加环境变量。";
+      }
+
+      addLog(`❌ 生成过程中出错: ${errorMsg}`);
     }
   };
 
@@ -124,11 +149,15 @@ export default function App() {
       addLog(isAuto ? "⚠️ 自动任务完成，但未配置接收邮箱。" : "⚠️ 请先输入有效的邮箱地址");
       return;
     }
+    
+    if (!content) {
+        addLog("⚠️ 无内容可发送。请先生成简报。");
+        return;
+    }
 
     addLog(`📧 ${isAuto ? '自动' : '手动'}推送：正在发送邮件至 ${activeEmails.length} 个地址...`);
     setIsSendingEmail(true);
     
-    // API Key is now handled by the backend
     const result = await sendEmail(activeEmails, content);
     
     if (result.success) {
@@ -143,10 +172,6 @@ export default function App() {
     const newEmails = [...emails];
     newEmails[index] = value;
     setEmails(newEmails);
-  };
-
-  const handleTestEmail = () => {
-    executeEmailSend(data, false);
   };
 
   return (
@@ -208,7 +233,6 @@ export default function App() {
                   </div>
                   <div className="flex justify-between text-sm mb-2">
                      <span className="text-gray-400">模型节点</span>
-                     {/* Display the actual model ID being used */}
                      <span className="text-emerald-400 font-mono text-xs truncate max-w-[150px] text-right" title={PRIMARY_MODEL}>{PRIMARY_MODEL}</span>
                   </div>
                   <div className="flex justify-between text-sm">
@@ -223,219 +247,154 @@ export default function App() {
                   className={`w-full py-4 rounded-xl flex items-center justify-center gap-2 transition-all duration-300 relative overflow-hidden group ${
                     status === AppStatus.SEARCHING || status === AppStatus.GENERATING 
                     ? 'bg-gray-800 cursor-not-allowed opacity-50' 
-                    : 'bg-white text-black hover:bg-gray-200'
+                    : 'bg-white text-black hover:bg-gray-100'
                   }`}
                 >
-                  {(status === AppStatus.SEARCHING || status === AppStatus.GENERATING) ? (
+                  {status === AppStatus.SEARCHING || status === AppStatus.GENERATING ? (
                     <>
                       <RefreshCw className="w-5 h-5 animate-spin" />
-                      <span>正在执行序列...</span>
+                      <span>Processing...</span>
                     </>
                   ) : (
                     <>
-                      <Sparkles className="w-5 h-5 transition-transform group-hover:scale-110" />
-                      <span className="font-medium">生成今日简报</span>
+                      <Sparkles className="w-5 h-5" />
+                      <span>Start Generation Sequence</span>
                     </>
                   )}
                 </button>
               </div>
             </GlassCard>
 
-            {/* Email Subscription Panel */}
-            <GlassCard className="space-y-4">
-               <div className="flex items-center justify-between">
-                  <h2 className="text-lg font-medium text-white flex items-center gap-2">
-                    <Mail className="w-5 h-5 text-purple-400" />
-                    Resend 邮件服务 (Cloud)
-                  </h2>
-                  <Clock className="w-4 h-4 text-gray-500" />
-               </div>
-               
-               <p className="text-[10px] text-gray-500 leading-tight">
-                 系统已接入 Vercel Serverless。请在后台配置 RESEND_API_KEY，无需在此输入。
-               </p>
-
-               <div className="space-y-2 mt-2">
-                 {emails.map((email, idx) => (
-                   <input
-                     key={idx}
-                     type="email"
-                     placeholder={`接收邮箱 ${idx + 1}`}
-                     value={email}
-                     onChange={(e) => handleEmailChange(idx, e.target.value)}
-                     className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-purple-500/50 transition-colors"
-                   />
-                 ))}
-               </div>
-               
-               {/* Test Button */}
-               <div className="flex justify-end pt-2 border-t border-white/5">
-                  <button
-                    onClick={handleTestEmail}
-                    disabled={isSendingEmail}
-                    className={`text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors border ${
-                      isSendingEmail 
-                        ? 'bg-purple-500/10 border-purple-500/10 text-purple-400/50 cursor-not-allowed'
-                        : 'bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border-purple-500/20'
-                    }`}
-                  >
-                    {isSendingEmail ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
-                    发送测试邮件
-                  </button>
-               </div>
-            </GlassCard>
-
-            {/* Terminal Log */}
-            <GlassCard className="h-[300px] flex flex-col">
-              <div className="mb-4 text-xs font-mono text-gray-500 uppercase tracking-widest border-b border-white/5 pb-2">
-                系统日志终端
+            {/* Terminal / Log */}
+            <GlassCard className="h-[250px] flex flex-col">
+              <div className="flex items-center gap-2 mb-4 border-b border-white/5 pb-2">
+                <Activity className="w-4 h-4 text-emerald-400" />
+                <span className="text-xs font-mono uppercase tracking-wider text-gray-400">System Log</span>
               </div>
-              <div ref={scrollRef} className="flex-1 overflow-y-auto font-mono text-xs space-y-2 text-green-400/80 pr-2">
-                {progressLog.length === 0 && <span className="text-gray-600 opacity-50">等待指令...</span>}
+              <div 
+                ref={scrollRef}
+                className="flex-grow overflow-y-auto font-mono text-xs space-y-2 pr-2 text-gray-400"
+              >
+                {progressLog.length === 0 && <span className="opacity-30">Waiting for commands...</span>}
                 {progressLog.map((log, i) => (
-                  <div key={i} className="animate-scanline">{log}</div>
+                  <div key={i} className="border-l-2 border-white/10 pl-2 py-0.5 animate-scanline">
+                    <span className="text-blue-500 mr-2">$</span>
+                    {log}
+                  </div>
                 ))}
               </div>
             </GlassCard>
 
-             {/* Viral Titles Preview (Only shows after generation) */}
-             {data && (
-               <GlassCard className="border-pink-500/20">
-                  <h3 className="text-pink-300 font-medium mb-4 flex items-center gap-2">
-                    <HeartPulse className="w-4 h-4" />
-                    全网热榜 (小红书风)
-                  </h3>
-                  <div className="space-y-3">
-                    {data.viral_titles.map((title, idx) => (
-                      <div key={idx} className="bg-pink-500/5 border border-pink-500/10 p-3 rounded-lg text-sm text-pink-100/90 font-medium">
-                        {title}
-                      </div>
-                    ))}
-                  </div>
-               </GlassCard>
-             )}
+            {/* Email Config */}
+             <GlassCard className="space-y-4">
+              <div className="flex items-center gap-2 text-white font-medium">
+                <Mail className="w-4 h-4 text-purple-400" />
+                <span>自动推送设置</span>
+              </div>
+              <div className="space-y-2">
+                {emails.map((email, idx) => (
+                  <input
+                    key={idx}
+                    type="email"
+                    placeholder={`Recipient ${idx + 1}`}
+                    value={email}
+                    onChange={(e) => handleEmailChange(idx, e.target.value)}
+                    className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-300 focus:outline-none focus:border-blue-500/50 transition-colors"
+                  />
+                ))}
+              </div>
+              <button 
+                onClick={() => executeEmailSend(data, false)}
+                disabled={isSendingEmail || !data}
+                className="w-full py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-sm text-gray-300 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isSendingEmail ? <RefreshCw className="w-3 h-3 animate-spin"/> : <Send className="w-3 h-3" />}
+                Send Manual Test
+              </button>
+            </GlassCard>
+
           </div>
 
-          {/* Right Column: Content Feed */}
-          <div className="lg:col-span-8 space-y-8">
-            {!data && status !== AppStatus.SEARCHING && status !== AppStatus.GENERATING && (
-              <div className="h-full flex flex-col items-center justify-center min-h-[400px] text-gray-500 opacity-50">
-                <Globe className="w-24 h-24 mb-4 stroke-1" />
-                <p className="font-light">系统就绪。等待执行指令。</p>
+          {/* Right Column: Content */}
+          <div className="lg:col-span-8 space-y-6">
+            {!data ? (
+              <GlassCard className="h-full min-h-[500px] flex flex-col items-center justify-center text-center p-12">
+                <div className="w-24 h-24 bg-white/5 rounded-full flex items-center justify-center mb-6 relative">
+                  <div className="absolute inset-0 rounded-full border border-white/10 animate-ping opacity-20"></div>
+                  <Globe className="w-10 h-10 text-gray-500" />
+                </div>
+                <h3 className="text-xl font-light text-white mb-2">Ready to Synchronize</h3>
+                <p className="text-gray-500 max-w-md">
+                  Waiting for retrieval command. System will verify links, translate content, and generate viral headers using Gemini 1.5 Pro.
+                </p>
+              </GlassCard>
+            ) : (
+              <div className="space-y-6 animate-scanline">
+                
+                {/* Viral Headers */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* General Viral */}
+                  <GlassCard className="bg-gradient-to-br from-pink-500/10 to-transparent border-pink-500/20">
+                    <h3 className="text-pink-400 font-bold mb-3 flex items-center gap-2">
+                      <Sparkles className="w-4 h-4" />
+                      Global Viral
+                    </h3>
+                    <ul className="space-y-2">
+                      {data.viral_titles.map((t, i) => (
+                        <li key={i} className="text-sm text-gray-200 border-l-2 border-pink-500/30 pl-3 py-1">
+                          <TypewriterText text={t} speed={20} />
+                        </li>
+                      ))}
+                    </ul>
+                  </GlassCard>
+
+                  {/* Medical Viral */}
+                  <GlassCard className="bg-gradient-to-br from-emerald-500/10 to-transparent border-emerald-500/20">
+                    <h3 className="text-emerald-400 font-bold mb-3 flex items-center gap-2">
+                      <Stethoscope className="w-4 h-4" />
+                      Health Viral
+                    </h3>
+                    <ul className="space-y-2">
+                      {data.medical_viral_titles?.map((t, i) => (
+                        <li key={i} className="text-sm text-gray-200 border-l-2 border-emerald-500/30 pl-3 py-1">
+                          <TypewriterText text={t} speed={20} />
+                        </li>
+                      )) || <li className="text-gray-500 text-sm italic">No viral health topics today.</li>}
+                    </ul>
+                  </GlassCard>
+                </div>
+
+                {/* News Sections */}
+                <div className="space-y-6">
+                  <div>
+                    <h3 className="text-xl text-blue-400 font-light mb-4 flex items-center gap-2">
+                      <Globe className="w-5 h-5" /> Global Affairs
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {data.general_news.map((item, i) => (
+                        <NewsCard key={i} item={item} idx={i} color="blue" />
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <h3 className="text-xl text-emerald-400 font-light mb-4 flex items-center gap-2">
+                      <HeartPulse className="w-5 h-5" /> Medical & Science
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {data.medical_news.map((item, i) => (
+                        <NewsCard key={i} item={item} idx={i} color="emerald" />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
               </div>
             )}
-
-            {data && (
-              <>
-                 {/* General News Section */}
-                 <div>
-                    <h3 className="text-xl text-white font-light mb-6 flex items-center gap-3">
-                      <span className="w-8 h-[1px] bg-blue-500"></span>
-                      全球时政要闻
-                    </h3>
-                    <div className="grid grid-cols-1 gap-4">
-                      {data.general_news.map((item, idx) => (
-                        <NewsCard key={idx} item={item} idx={idx} color="blue" />
-                      ))}
-                    </div>
-                 </div>
-
-                 {/* Medical News Section */}
-                 <div>
-                    <h3 className="text-xl text-white font-light mb-6 flex items-center gap-3">
-                      <span className="w-8 h-[1px] bg-emerald-500"></span>
-                      前沿医学进展
-                    </h3>
-                    
-                    {/* Medical Viral Titles (New Feature) */}
-                    {data.medical_viral_titles && data.medical_viral_titles.length > 0 && (
-                      <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-3">
-                        {data.medical_viral_titles.map((title, i) => (
-                           <div key={i} className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg flex flex-col justify-center">
-                              <div className="flex items-center gap-2 mb-1">
-                                <Stethoscope className="w-3 h-3 text-emerald-400" />
-                                <span className="text-[10px] text-emerald-300 uppercase">健康热搜</span>
-                              </div>
-                              <p className="text-xs font-medium text-emerald-100 leading-relaxed">
-                                {title}
-                              </p>
-                           </div>
-                        ))}
-                      </div>
-                    )}
-
-                    <div className="grid grid-cols-1 gap-4">
-                      {data.medical_news.map((item, idx) => (
-                        <NewsCard key={idx} item={item} idx={idx} color="emerald" />
-                      ))}
-                    </div>
-                 </div>
-              </>
-            )}
           </div>
+
         </div>
       </div>
     </div>
   );
 }
-
-// Sub-component for News Item
-const NewsCard: React.FC<NewsCardProps> = ({ item, idx, color }) => {
-  const isBlue = color === 'blue';
-  const themeColor = isBlue ? 'blue' : 'emerald';
-  
-  return (
-    <GlassCard delay={idx * 100} className="group hover:bg-white/10">
-      <div className="flex flex-col md:flex-row gap-6">
-        <div className="flex-1 space-y-3">
-          {/* Header with Source */}
-          <div className="flex items-center justify-between">
-             <span className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded bg-${themeColor}-500/10 text-${themeColor}-400 border border-${themeColor}-500/20`}>
-               {item.source_name}
-             </span>
-             <a 
-              href={item.source_url} 
-              target="_blank" 
-              rel="noreferrer"
-              className={`hidden md:inline-flex items-center gap-1 text-xs text-${themeColor}-400 hover:text-white transition-colors pb-0.5 border-b border-transparent hover:border-${themeColor}-400`}
-            >
-              访问来源 ↗
-            </a>
-          </div>
-
-          {/* Titles */}
-          <div>
-            <a href={item.source_url} target="_blank" rel="noreferrer" className="block">
-              <h4 className={`text-lg font-medium text-white mb-1 leading-tight group-hover:text-${themeColor}-300 transition-colors`}>
-                {item.title_cn}
-              </h4>
-            </a>
-            <p className="text-sm text-gray-400 font-light">{item.title_en}</p>
-          </div>
-
-          {/* Summaries */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm mt-2">
-            <div className="text-gray-300 font-light leading-relaxed border-l-2 border-white/10 pl-3">
-               <TypewriterText text={item.summary_cn} speed={5} />
-            </div>
-            <div className="text-gray-500 font-light leading-relaxed border-l-2 border-white/5 pl-3">
-               <p>{item.summary_en}</p>
-            </div>
-          </div>
-          
-          {/* Mobile Link */}
-           <div className="pt-2 md:hidden">
-            <a 
-              href={item.source_url} 
-              target="_blank" 
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-white transition-colors"
-            >
-              验证来源 ↗
-            </a>
-          </div>
-        </div>
-      </div>
-    </GlassCard>
-  );
-};
