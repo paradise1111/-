@@ -17,7 +17,6 @@ export default async function handler(request, response) {
 
   // 2. 准备环境变量
   const apiKey = process.env.API_KEY;
-  const baseUrl = process.env.GEMINI_BASE_URL;
   const resendApiKey = process.env.RESEND_API_KEY;
   const fromEmail = process.env.EMAIL_FROM || 'Aurora News <onboarding@resend.dev>';
   
@@ -44,8 +43,8 @@ export default async function handler(request, response) {
   const todayDateStr = beijingTime.toISOString().split('T')[0];
 
   try {
-    // 4. 调用 Gemini 生成内容 (复用 geminiService 的逻辑，但在 Node 环境重写)
-    const ai = new GoogleGenAI({ apiKey, baseUrl });
+    // 4. 调用 Gemini 生成内容
+    const ai = new GoogleGenAI({ apiKey });
     
     const newsItemSchema = {
       type: Type.OBJECT,
@@ -84,9 +83,6 @@ export default async function handler(request, response) {
 
     console.log(`Generating content for date: ${targetDateStr} using model: ${modelId}...`);
     
-    // 判断是否是 Gemini 原生模型，如果是则尝试开启 Thinking (可选)
-    // 为了稳妥起见，自动任务中我们默认关闭 thinkingConfig，除非你非常确定你的模型支持。
-    // 如果需要开启，可以在这里手动添加 thinkingConfig
     const config = {
         tools: [{ googleSearch: {} }],
         responseMimeType: "application/json",
@@ -102,9 +98,8 @@ export default async function handler(request, response) {
     const content = JSON.parse(genResponse.text);
     console.log("Content generated successfully.");
 
-    // 5. 生成 HTML (简化版，为了代码独立性，直接内联 HTML 生成逻辑)
+    // 5. 生成 HTML (简化版)
     const generateHtml = (data) => {
-      // 简单复用 HTML 结构
       const listItems = (items, color) => items.map(item => `
         <div style="margin-bottom: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 8px;">
           <div style="font-weight: bold; margin-bottom: 5px;"><a href="${item.source_url}" style="color: #333; text-decoration: none;">${item.title_cn}</a></div>
