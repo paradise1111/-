@@ -162,12 +162,16 @@ export default function App() {
       console.error(e);
       setStatus(AppStatus.ERROR);
       
-      // 用户友好的错误解析
+      // 显示真实错误，方便调试
       let errorMsg = e.message || "未知错误";
-      if (errorMsg.includes("API key not valid") || errorMsg.includes("400")) {
-        errorMsg = "API Key 无效 (400)。请检查设置中的 API Key。";
-      } else if (errorMsg.includes("API_KEY is missing")) {
-        errorMsg = "未配置 API Key。请在设置中输入 Key 或在服务器配置。";
+      
+      // 仍然保留一些基本提示，但附加原始错误
+      if (errorMsg.includes("400")) {
+        errorMsg = `请求被拒绝 (400)。原因: ${errorMsg}`;
+      } else if (errorMsg.includes("404")) {
+         errorMsg = `资源未找到 (404)。模型 ID 可能错误: ${errorMsg}`;
+      } else if (errorMsg.includes("401") || errorMsg.includes("403")) {
+          errorMsg = `权限错误 (401/403)。API Key 无效: ${errorMsg}`;
       }
 
       addLog(`❌ 生成过程中出错: ${errorMsg}`);

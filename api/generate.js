@@ -25,7 +25,7 @@ export default async function handler(request, response) {
     }
   };
 
-  // 1. 获取配置：优先使用 Header 中的自定义配置 (解码后)，其次使用环境变量
+  // 1. 获取配置
   const customApiKey = getHeader('x-custom-api-key');
   const customBaseUrl = getHeader('x-custom-base-url');
   const customModel = getHeader('x-custom-model');
@@ -36,7 +36,7 @@ export default async function handler(request, response) {
     return response.status(500).json({ error: "Configuration Error: API_KEY is missing (Server env or Custom header)." });
   }
 
-  // 清洗 API Key (移除可能存在的引号)
+  // 清洗 API Key
   apiKey = apiKey.trim();
   if ((apiKey.startsWith('"') && apiKey.endsWith('"')) || (apiKey.startsWith("'") && apiKey.endsWith("'"))) {
     apiKey = apiKey.slice(1, -1);
@@ -45,9 +45,10 @@ export default async function handler(request, response) {
   // 2. 初始化 SDK
   const clientOptions = { apiKey };
   if (customBaseUrl && customBaseUrl.trim() !== '') {
-    // 确保 URL 格式正确，处理末尾斜杠
     let url = customBaseUrl.trim();
     if (!url.startsWith('http')) url = `https://${url}`;
+    // 去掉末尾的 /，防止双重斜杠问题
+    if (url.endsWith('/')) url = url.slice(0, -1);
     clientOptions.baseUrl = url;
   }
 
@@ -57,18 +58,32 @@ export default async function handler(request, response) {
   const PRIMARY_MODEL = customModel || process.env.GEMINI_MODEL_ID || 'gemini-3-pro-preview';
   const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL_ID || 'gemini-3-flash-preview';
 
+  // Helper: 安全处理模型名称
+  // 如果模型名称包含特殊字符（如 [] 或中文），而 SDK 没有进行编码，可能会导致 HTTP 400 错误。
+  // 我们检测如果包含非URL安全字符，则进行编码。
+  const sanitizeModelName = (name) => {
+      if (!name) return name;
+      // 检查是否包含除了字母、数字、点、横线、下划线以外的字符
+      if (/[^a-zA-Z0-9.\-_]/.test(name)) {
+          console.log(`Model name '${name}' contains special characters. Applying URI encoding.`);
+          return encodeURIComponent(name);
+      }
+      return name;
+  };
+
   // --- 模式 1: 连通性检查 (GET) ---
   if (request.method === 'GET' && request.query.check === 'true') {
     try {
-      // 简单的 Ping 测试
+      const safeModel = sanitizeModelName(PRIMARY_MODEL);
       await ai.models.generateContent({
-        model: PRIMARY_MODEL,
+        model: safeModel,
         contents: 'ping',
       });
-      return response.status(200).json({ success: true, model: PRIMARY_MODEL, baseUrl: clientOptions.baseUrl || 'Default' });
+      return response.status(200).json({ success: true, model: PRIMARY_MODEL });
     } catch (error) {
       console.error("Connectivity check failed:", error);
-      return response.status(500).json({ success: false, error: error.message });
+      // 返回详细错误
+      return response.status(500).json({ success: false, error: error.toString() });
     }
   }
 
@@ -115,10 +130,13 @@ export default async function handler(request, response) {
         - 双语对应。
       `;
 
-      // 内部函数：执行生成，支持重试和降级
-      const executeGeneration = async (model, useThinking, retries = 0) => {
+      // 内部函数：执行生成
+      const executeGeneration = async (modelName, useThinking, retries = 0) => {
         try {
-          console.log(`Generating with model: ${model}, thinking: ${useThinking}`);
+          // 应用 URL 编码以修复 [channel] 格式的 400 错误
+          const safeModel = sanitizeModelName(modelName);
+
+          console.log(`Generating with model: ${safeModel} (raw: ${modelName}), thinking: ${useThinking}`);
           const config = {
             tools: [{ googleSearch: {} }],
             responseMimeType: "application/json",
@@ -130,7 +148,7 @@ export default async function handler(request, response) {
           }
 
           const result = await ai.models.generateContent({
-            model: model,
+            model: safeModel,
             contents: prompt,
             config: config,
           });
@@ -138,10 +156,9 @@ export default async function handler(request, response) {
           return JSON.parse(result.text);
         } catch (err) {
           if (retries > 0) {
-            console.warn(`Retry needed for ${model}. Remaining: ${retries - 1}`);
+            console.warn(`Retry needed for ${modelName}. Error: ${err.message}. Remaining: ${retries - 1}`);
             await new Promise(r => setTimeout(r, 1000));
-            // 递归重试，关闭 Thinking 以提高稳定性
-            return executeGeneration(model, false, retries - 1);
+            return executeGeneration(modelName, false, retries - 1);
           }
           throw err;
         }
@@ -151,8 +168,6 @@ export default async function handler(request, response) {
       let data;
       try {
         const isNative = PRIMARY_MODEL.includes('gemini-3') || PRIMARY_MODEL.includes('gemini-2.5');
-        // 如果用户自定义了 BaseURL，通常意味着使用代理，可能对 Thinking 参数支持不一，建议默认不开启 Thinking 或视情况而定
-        // 这里保持原逻辑，尝试开启
         data = await executeGeneration(PRIMARY_MODEL, isNative, 0);
       } catch (e1) {
         console.warn("Primary attempt failed, retrying without thinking...", e1);
@@ -160,8 +175,7 @@ export default async function handler(request, response) {
             data = await executeGeneration(PRIMARY_MODEL, false, 1);
         } catch (e2) {
             console.warn("Primary model failed completely, switching to fallback...", e2);
-            // 如果使用了自定义 Key/Model，切换到默认 Fallback Model 可能会因为权限问题失败(如果Key不通用)
-            // 但如果 Fallback 也是 Gemini 系列，通常是通用的
+            // 这里 Fallback 模型通常是标准的 'gemini-3-flash-preview'，不需要编码
             data = await executeGeneration(FALLBACK_MODEL, false, 1);
         }
       }
@@ -170,7 +184,9 @@ export default async function handler(request, response) {
 
     } catch (error) {
       console.error("Generation API Failed:", error);
-      return response.status(500).json({ error: error.message || "Internal Server Error" });
+      // 透传上游错误信息
+      const errorMsg = error.response ? JSON.stringify(error.response) : error.message;
+      return response.status(500).json({ error: errorMsg || "Internal Server Error" });
     }
   }
 
